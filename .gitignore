@@ -1,0 +1,12 @@
+# Terraform working state. Modules don't commit a lock file; each
+# consuming configuration commits its own.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfplan
+
+# Never commit a service account key or an age identity.
+*-sa.json
+*.key
