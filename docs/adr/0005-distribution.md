@@ -22,13 +22,13 @@ Both halves are released together by tagging this repository
 
 `ansible/galaxy.yml`'s `version` is bumped to match each tag.
 
-## Open: access to a private repository
+## Visibility
 
-The repository is private. Every consumer that fetches it needs read
-access: a person's `gh`/git credentials locally, and in CI a deploy key or
-a fine-grained token scoped to this repository, configured in each
-consuming organisation. The alternative is making it public: it contains
-no secrets. Not decided here.
+The repository will be **public** once v0.1 is ready: it holds no
+secrets, no state and no real project IDs, and being public removes the
+need for deploy keys or tokens in every consuming organisation and CI.
+Until then it stays private, and its history is kept free of AI
+attribution (the commit-policy hook enforces this).
 
 ## Consequences
 
