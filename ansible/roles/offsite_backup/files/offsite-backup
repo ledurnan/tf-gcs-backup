@@ -1,0 +1,240 @@
+#!/bin/bash
+#
+# offsite-backup: encrypted, tamper-resistant backup to Google Cloud Storage.
+# Installed by the ledurnan.gcs_backup.offsite_backup role; edit the role,
+# not this copy.
+#
+# One run:
+#   1. check the bucket's expiry rules agree with this host's tiers (the
+#      tier contract); refuse to upload if not
+#   2. run the optional pre-backup hook (a database dump, an export) into
+#      a scratch directory
+#   3. tar the configured paths plus that dump, encrypt to the age
+#      recipients (the host holds no private key)
+#   4. upload one object per tier due today, each with a retain-until and
+#      retention mode, then read each back and compare sizes
+#
+# Usage: offsite-backup [--check-contract]
+#   --check-contract  only run step 1, then exit
+#
+# Configuration, all under $OFFSITE_BACKUP_CONF_DIR (default /etc/offsite-backup):
+#   backup.conf   shell KEY=value lines: BUCKET, PREFIX, RETENTION_MODE,
+#                 LIFECYCLE_SLACK_DAYS, WORK_DIR, STATE_DIR
+#   tiers         one tier per line: <name> <retain_days> <when> [<name_format>]
+#                   when: always | weekday:<1-7, Monday=1> | monthday:<01-28>
+#                   name_format: date(1) format for the object name
+#   paths         one absolute path per line
+#   recipients    age recipients, one per line (age -R format)
+#   pre-backup    optional executable, run with DUMP_DIR set; whatever it
+#                 writes there is archived under offsite-backup-dump/
+
+set -euo pipefail
+umask 077
+
+CONF_DIR="${OFFSITE_BACKUP_CONF_DIR:-/etc/offsite-backup}"
+# Tests set OFFSITE_BACKUP_NOW (seconds since the epoch) to pin the date.
+NOW="${OFFSITE_BACKUP_NOW:-$(date -u +%s)}"
+
+# shellcheck source=/dev/null
+. "$CONF_DIR/backup.conf"
+
+: "${BUCKET:?BUCKET is not set in backup.conf}"
+: "${PREFIX:?PREFIX is not set in backup.conf}"
+: "${RETENTION_MODE:?RETENTION_MODE is not set in backup.conf}"
+: "${LIFECYCLE_SLACK_DAYS:?LIFECYCLE_SLACK_DAYS is not set in backup.conf}"
+: "${WORK_DIR:?WORK_DIR is not set in backup.conf}"
+: "${STATE_DIR:?STATE_DIR is not set in backup.conf}"
+
+export CLOUDSDK_CONFIG="${CLOUDSDK_CONFIG:-$STATE_DIR/gcloud}"
+LAST_ERROR="$STATE_DIR/last-error"
+
+log() {
+  logger -t offsite-backup -p "daemon.$1" -- "$2" 2>/dev/null || true
+  echo "$2" >&2
+}
+
+# The message is also left in LAST_ERROR for offsite-backup-report, the
+# ExecStopPost= hook that reports each run.
+die() {
+  log err "$1"
+  printf '%s\n' "$1" >"$LAST_ERROR"
+  exit 1
+}
+
+mkdir -p "$STATE_DIR"
+rm -f "$LAST_ERROR"
+
+case "$RETENTION_MODE" in
+  Locked | Unlocked) ;;
+  *) die "RETENTION_MODE must be Locked or Unlocked, not '$RETENTION_MODE'" ;;
+esac
+
+# --- tiers ------------------------------------------------------------
+
+TIER_NAMES=()
+TIER_DAYS=()
+TIER_WHEN=()
+TIER_FORMAT=()
+
+while read -r name days when format; do
+  [[ -z "${name:-}" || "$name" == \#* ]] && continue
+  [[ "$days" =~ ^[1-9][0-9]*$ ]] || die "tier '$name': retain_days '$days' is not a whole number of at least 1"
+  case "$when" in
+    always) default_format='%Y-%m-%d' ;;
+    weekday:[1-7]) default_format='%G-W%V' ;;
+    monthday:0[1-9] | monthday:1[0-9] | monthday:2[0-8]) default_format='%Y-%m' ;;
+    *) die "tier '$name': when '$when' must be always, weekday:<1-7> or monthday:<01-28>" ;;
+  esac
+  TIER_NAMES+=("$name")
+  TIER_DAYS+=("$days")
+  TIER_WHEN+=("$when")
+  TIER_FORMAT+=("${format:-$default_format}")
+done <"$CONF_DIR/tiers"
+
+[ "${#TIER_NAMES[@]}" -gt 0 ] || die "no tiers configured in $CONF_DIR/tiers"
+
+# --- 1. the tier contract ---------------------------------------------
+
+# The bucket expires "<tier>/" objects after retain_days + slack. If this
+# host's tiers disagree, objects would expire too early (before their
+# retention, so deletion fails and they linger) or be kept longer than
+# the consumer promised. Refuse to write anything until they agree.
+check_contract() {
+  local bucket_json expected
+  bucket_json="$(gcloud storage buckets describe "gs://${BUCKET}" --format=json)" \
+    || die "cannot read gs://${BUCKET}'s configuration (does the role grant storage.buckets.get?)"
+
+  expected=""
+  for i in "${!TIER_NAMES[@]}"; do
+    expected+="${TIER_NAMES[$i]} $((TIER_DAYS[i] + LIFECYCLE_SLACK_DAYS))"$'\n'
+  done
+
+  python3 -c '
+import json, sys
+
+bucket = json.loads(sys.argv[1])
+rules = (bucket.get("lifecycle_config") or bucket.get("lifecycle") or {}).get("rule", [])
+have = {}
+for rule in rules:
+    if rule.get("action", {}).get("type") != "Delete":
+        continue
+    cond = rule.get("condition", {})
+    for prefix in cond.get("matchesPrefix", cond.get("matches_prefix", [])):
+        have[prefix] = cond.get("age")
+
+problems = []
+for line in sys.argv[2].splitlines():
+    if not line.strip():
+        continue
+    name, age = line.split()
+    got = have.get(name + "/")
+    if got is None:
+        problems.append(f"no expiry rule for {name}/")
+    elif int(got) != int(age):
+        problems.append(f"{name}/ expires after {got} days, this host expects {age}")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+' "$bucket_json" "$expected" >"$STATE_DIR/contract" 2>&1 \
+    || die "tier contract broken for gs://${BUCKET}: $(cat "$STATE_DIR/contract")"
+
+  log info "tier contract holds for gs://${BUCKET}"
+}
+
+check_contract
+
+if [ "${1:-}" = "--check-contract" ]; then
+  exit 0
+fi
+
+# --- 2 and 3. build -----------------------------------------------------
+
+mkdir -p "$WORK_DIR"
+WORK="$(mktemp -d "$WORK_DIR/run.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+TAR_ARGS=()
+
+if [ -s "$CONF_DIR/paths" ]; then
+  while read -r path; do
+    [[ -z "$path" || "$path" == \#* ]] && continue
+    [[ "$path" == /* ]] || die "path '$path' is not absolute"
+    TAR_ARGS+=("${path#/}")
+  done <"$CONF_DIR/paths"
+fi
+
+if [ -x "$CONF_DIR/pre-backup" ]; then
+  mkdir -p "$WORK/offsite-backup-dump"
+  log info "running pre-backup hook"
+  DUMP_DIR="$WORK/offsite-backup-dump" "$CONF_DIR/pre-backup" \
+    || die "pre-backup hook failed (rc=$?); nothing uploaded"
+  TAR_ARGS+=(-C "$WORK" offsite-backup-dump)
+fi
+
+[ "${#TAR_ARGS[@]}" -gt 0 ] || die "nothing to back up: no paths and no pre-backup hook"
+
+# tar exits 1 for "file changed as we read it", routine for live data and
+# not a failure. Anything above 1 is. The archive streams straight into
+# age, so only the encrypted copy ever touches disk.
+#
+# errexit is off for the pipeline so a failure reaches die() with its
+# reason, instead of ending the script silently.
+set +e +o pipefail
+tar --warning=no-file-changed --warning=no-file-removed \
+  -C / -cz "${TAR_ARGS[@]}" \
+  | age -R "$CONF_DIR/recipients" -o "$WORK/backup.tar.age"
+statuses=("${PIPESTATUS[@]}")
+set -e -o pipefail
+
+# age first: when age dies, tar fails with a broken pipe, and blaming tar
+# would send you to the wrong place.
+[ "${statuses[1]}" -eq 0 ] || die "age encryption failed with rc=${statuses[1]}; nothing uploaded"
+[ "${statuses[0]}" -le 1 ] || die "tar failed with rc=${statuses[0]}; nothing uploaded"
+
+LOCAL_SIZE="$(stat -c %s "$WORK/backup.tar.age")"
+[ "$LOCAL_SIZE" -gt 0 ] || die "encrypted archive is empty; nothing uploaded"
+
+# --- 4. upload ------------------------------------------------------------
+
+upload() {
+  local object="$1" retain_days="$2" until remote_size
+  until="$(date -u -d "@$((NOW + retain_days * 86400))" +%Y-%m-%dT%H:%M:%SZ)"
+
+  gcloud storage cp "$WORK/backup.tar.age" "gs://${BUCKET}/${object}" \
+    --retain-until="$until" --retention-mode="$RETENTION_MODE" \
+    || die "upload of ${object} failed"
+
+  # Read back. An upload that returns 0 but stored nothing useful is the
+  # silent failure this whole design exists to catch.
+  remote_size="$(gcloud storage objects describe "gs://${BUCKET}/${object}" \
+    --format='value(size)' 2>/dev/null || true)"
+  [ "$remote_size" = "$LOCAL_SIZE" ] \
+    || die "verify failed for ${object}: local ${LOCAL_SIZE} bytes, remote '${remote_size}'"
+
+  log info "stored ${object} (${LOCAL_SIZE} bytes, ${RETENTION_MODE} until ${until})"
+}
+
+DAY_OF_WEEK="$(date -u -d "@$NOW" +%u)"
+DAY_OF_MONTH="$(date -u -d "@$NOW" +%d)"
+uploaded=0
+
+for i in "${!TIER_NAMES[@]}"; do
+  case "${TIER_WHEN[$i]}" in
+    always) due=1 ;;
+    weekday:*) [ "$DAY_OF_WEEK" = "${TIER_WHEN[$i]#weekday:}" ] && due=1 || due=0 ;;
+    monthday:*) [ "$DAY_OF_MONTH" = "${TIER_WHEN[$i]#monthday:}" ] && due=1 || due=0 ;;
+  esac
+  [ "$due" -eq 1 ] || continue
+
+  stamp="$(date -u -d "@$NOW" +"${TIER_FORMAT[$i]}")"
+  upload "${TIER_NAMES[$i]}/${PREFIX}/${stamp}.tar.age" "${TIER_DAYS[$i]}"
+  uploaded=$((uploaded + 1))
+done
+
+# A tier list where nothing is due today is legitimate (say, weekly only),
+# but it means this run protected nothing, so say so.
+if [ "$uploaded" -eq 0 ]; then
+  log warning "no tier was due today; nothing uploaded"
+else
+  log info "backup complete: ${uploaded} object(s) stored"
+fi

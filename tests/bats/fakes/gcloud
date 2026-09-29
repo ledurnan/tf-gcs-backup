@@ -1,0 +1,29 @@
+#!/bin/bash
+# Fake gcloud for the bats tests. A directory stands in for the bucket.
+#   FAKE_GCS_DIR          directory holding uploaded objects
+#   FAKE_GCS_LOG          every call is appended here
+#   FAKE_BUCKET_JSON      file returned by `storage buckets describe`
+#   FAKE_REMOTE_SIZE      if set, `objects describe` reports this size
+set -eu
+echo "gcloud $*" >>"$FAKE_GCS_LOG"
+case "$1 $2 $3" in
+  "storage buckets describe")
+    [ -n "${FAKE_BUCKET_DESCRIBE_FAIL:-}" ] && exit 1
+    cat "$FAKE_BUCKET_JSON" ;;
+  "storage cp "*)
+    src="$3" dst="$4"
+    if [[ "$src" == gs://* ]]; then
+      cp "$FAKE_GCS_DIR/${src#gs://}" "$dst"
+    else
+      dst="${dst#gs://}"
+      mkdir -p "$FAKE_GCS_DIR/$(dirname "$dst")"
+      cp "$src" "$FAKE_GCS_DIR/$dst"
+    fi ;;
+  "storage objects describe")
+    obj="${4#gs://}"
+    if [ -n "${FAKE_REMOTE_SIZE:-}" ]; then echo "$FAKE_REMOTE_SIZE"; else stat -c %s "$FAKE_GCS_DIR/$obj"; fi ;;
+  "storage ls "*)
+    prefix="${3#gs://}"
+    find "$FAKE_GCS_DIR/$prefix" -maxdepth 1 -type f -printf "gs://$prefix%f\n" 2>/dev/null ;;
+  *) echo "fake gcloud: unhandled: $*" >&2; exit 2 ;;
+esac
