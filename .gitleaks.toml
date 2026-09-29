@@ -1,0 +1,173 @@
+# Gitleaks Configuration for Development Repository
+# Extends default gitleaks rules with custom patterns for LLM APIs, IaC, and more
+
+title = "Development Repository Secret Scanning"
+
+[extend]
+# Use default gitleaks rules as base
+useDefault = true
+
+# Additional custom rules for patterns not covered by defaults
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API Key"
+regex = '''sk-ant-api[0-9]{2}-[a-zA-Z0-9_-]{48,100}AA'''
+tags = ["api-key", "anthropic", "llm"]
+keywords = ["sk-ant-api"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API Key"
+regex = '''sk-(proj-)?[a-zA-Z0-9]{48,}'''
+tags = ["api-key", "openai", "llm"]
+keywords = ["sk-proj", "openai"]
+
+[[rules]]
+id = "google-gemini-api-key"
+description = "Google/Gemini API Key"
+regex = '''AIza[0-9A-Za-z_-]{35}'''
+tags = ["api-key", "google", "gemini", "llm"]
+keywords = ["AIza"]
+
+[[rules]]
+id = "cohere-api-key"
+description = "Cohere API Key"
+regex = '''co_[a-zA-Z0-9]{40}'''
+tags = ["api-key", "cohere", "llm"]
+keywords = ["co_"]
+
+[[rules]]
+id = "huggingface-token"
+description = "Hugging Face Access Token"
+regex = '''hf_[a-zA-Z0-9]{34}'''
+tags = ["api-key", "huggingface", "llm"]
+keywords = ["hf_"]
+
+[[rules]]
+id = "replicate-api-token"
+description = "Replicate API Token"
+regex = '''r8_[a-zA-Z0-9]{40}'''
+tags = ["api-key", "replicate", "llm"]
+keywords = ["r8_"]
+
+[[rules]]
+id = "terraform-hardcoded-credentials"
+description = "Terraform Hardcoded Credentials"
+regex = '''(access_key|secret_key|password|token)\s*=\s*"[^"\$]+"'''
+tags = ["terraform", "iac", "credentials"]
+keywords = ["access_key", "secret_key", "password", "token"]
+[rules.allowlist]
+paths = [
+    '''\.tf\.example$''',
+    '''\.tfvars\.example$''',
+    '''^docs/''',
+    '''^examples/'''
+]
+
+[[rules]]
+id = "ansible-plaintext-password"
+description = "Ansible Plaintext Password"
+regex = '''(ansible_password|ansible_ssh_pass|vault_password):\s*[^{\s]'''
+tags = ["ansible", "iac", "credentials"]
+keywords = ["ansible_password", "ansible_ssh_pass", "vault_password"]
+[rules.allowlist]
+paths = [
+    '''\.example\.ya?ml$''',
+    '''^docs/''',
+    '''^examples/'''
+]
+
+[[rules]]
+id = "azure-service-principal"
+description = "Azure Service Principal Credentials"
+regex = '''(client_id|client_secret|tenant_id)\s*=\s*"[a-z0-9-]{36}"'''
+tags = ["azure", "cloud", "credentials"]
+keywords = ["client_id", "client_secret", "tenant_id"]
+
+[[rules]]
+id = "database-connection-string"
+description = "Database Connection String with Password"
+regex = '''(mongodb|postgres|mysql|redis|amqp)://[^:]+:[^@\s]+@'''
+tags = ["database", "credentials", "connection-string"]
+keywords = ["mongodb://", "postgres://", "mysql://", "redis://", "amqp://"]
+[rules.allowlist]
+paths = [
+    '''^docs/''',
+    '''^examples/''',
+    '''^tests/'''
+]
+regexes = [
+    '''(localhost|127\.0\.0\.1|example\.com|placeholder|dummy)'''
+]
+
+[[rules]]
+id = "env-file"
+description = "Environment file that may contain secrets"
+regex = '''.*'''
+path = '''(^|/)\.env(\.|$)'''
+tags = ["env", "config"]
+
+[[rules]]
+id = "terraform-state-file"
+description = "Terraform state files contain all secrets in plaintext"
+regex = '''.*'''
+path = '''\.tfstate(\.backup)?$'''
+tags = ["terraform", "iac", "state"]
+
+[[rules]]
+id = "terraform-vars-file"
+description = "Terraform variable files often contain production credentials"
+regex = '''.*'''
+path = '''\.tfvars$|^terraform\.tfvars$'''
+tags = ["terraform", "iac", "variables"]
+
+[[rules]]
+id = "ansible-vault-file"
+description = "Ansible vault files should be carefully managed"
+regex = '''.*'''
+path = '''vault\.ya?ml$'''
+tags = ["ansible", "iac", "vault"]
+
+[[rules]]
+id = "ssh-private-key-file"
+description = "SSH private key files"
+regex = '''-----BEGIN .* PRIVATE KEY-----'''
+tags = ["ssh", "private-key", "credentials"]
+
+[[rules]]
+id = "credential-files"
+description = "Common credential file names"
+regex = '''.*'''
+path = '''(credentials|secrets|passwords|\.aws/credentials|\.netrc|\.git-credentials)$'''
+tags = ["credentials", "config"]
+
+# Global allowlist for safe paths
+[allowlist]
+description = "Global allowlist for documentation, tests, and examples"
+paths = [
+    '''\.md$''',
+    '''\.example$''',
+    '''^docs/''',
+    '''^examples/''',
+    '''^\.git/''',
+    '''(^|/)node_modules/''',
+    '''(^|/)vendor/''',
+    '''(^|/)\.venv/''',
+    '''(^|/)venv/''',
+    '''\.png$''',
+    '''\.jpg$''',
+    '''\.jpeg$''',
+    '''\.gif$''',
+    '''\.svg$''',
+    '''\.pdf$''',
+    '''\.lock$''',
+    '''package-lock\.json$''',
+    '''uv\.lock$''',
+    '''Pipfile\.lock$'''
+]
+
+# Allowlist for known safe patterns
+regexes = [
+    '''(example|placeholder|dummy|test|mock|sample)'''
+]
