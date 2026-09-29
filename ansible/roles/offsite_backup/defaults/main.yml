@@ -1,0 +1,100 @@
+---
+# Sending side of the tf-gcs-backup pattern. The receiving side (bucket,
+# expiry rules, write-only role, service account) is the Terraform in
+# modules/; this role only runs on the backed-up host.
+#
+# Everything consumer-specific is an input. Nothing here is a working
+# configuration on its own: the role refuses to enable until the
+# required values below are set.
+
+# Master switch. Off, the role does nothing.
+offsite_backup_enabled: false
+
+# --- Where ------------------------------------------------------------
+
+# REQUIRED. The bucket, from the backup-target module's bucket_name output.
+offsite_backup_bucket: ""
+
+# Folder name for this host inside each tier: objects are written to
+# <tier>/<prefix>/<date>.tar.age.
+offsite_backup_prefix: "{{ inventory_hostname }}"
+
+# --- Retention (the tier contract) ------------------------------------
+
+# REQUIRED. Must list the same tiers, with the same retain_days, as the
+# backup-target module's `tiers` input. The script checks this against
+# the bucket before every run and refuses to upload if they differ.
+#
+# Each tier:
+#   name         matches the Terraform tier name (the object prefix)
+#   retain_days  whole number of days each object is locked for
+#   when         always | weekday:<1-7, Monday=1> | monthday:<01-28>
+#   name_format  optional date(1) format for the object name. Defaults:
+#                always %Y-%m-%d, weekday %G-W%V, monthday %Y-%m
+#
+# Retention is a data-protection decision: choose it for the data this
+# host holds. Locked retention cannot be shortened once written.
+offsite_backup_tiers: []
+
+# Must equal the module's lifecycle_slack_days.
+offsite_backup_lifecycle_slack_days: 1
+
+# REQUIRED. Locked (production: nobody can delete or shorten an object
+# before its retain-until, including the project owner) or Unlocked
+# (testing and first rollout: an operator can remove a mistake).
+offsite_backup_retention_mode: ""
+
+# --- What -------------------------------------------------------------
+
+# Absolute paths to archive. Required unless offsite_backup_pre_command
+# is set. Never list a live database's files: use the pre-backup command
+# to dump it instead.
+offsite_backup_paths: []
+
+# Optional shell commands run before archiving, as root, with DUMP_DIR
+# set to a scratch directory. Whatever they write there is archived
+# under offsite-backup-dump/. A non-zero exit fails the run. Example:
+#   mysqldump --all-databases --single-transaction > "$DUMP_DIR/all.sql"
+offsite_backup_pre_command: ""
+
+# --- Encryption -------------------------------------------------------
+
+# REQUIRED. One or more age public keys (age1...). The matching private
+# keys must never be on this host. Two recipients (an everyday operator
+# key and an offline recovery key) mean losing one isn't fatal.
+offsite_backup_age_recipients: []
+
+# --- Credential -------------------------------------------------------
+
+# REQUIRED. The writer service account's JSON key, from your secret
+# store (issued out of band: see the module's key_issue_command output).
+offsite_backup_sa_key: ""
+
+# --- Reporting --------------------------------------------------------
+
+# Optional heartbeat URL. Every run, success or failure, is POSTed as
+# {"status":"ok"} or {"status":"failed","detail":...}. Treat it as a
+# secret: most heartbeat URLs are their own credential.
+offsite_backup_report_url: ""
+
+# --- Schedule and resources -------------------------------------------
+
+offsite_backup_on_calendar: "daily"
+offsite_backup_randomized_delay: "1h"
+# A backup that hangs must not run forever. Raise it for large dumps.
+offsite_backup_timeout: "30min"
+# Where the encrypted archive is built. Needs free space for one
+# compressed, encrypted copy of everything backed up; keep it off tmpfs
+# for large data.
+offsite_backup_work_dir: /var/tmp/offsite-backup
+
+# --- Locations on the host --------------------------------------------
+
+offsite_backup_conf_dir: /etc/offsite-backup
+offsite_backup_state_dir: /var/lib/offsite-backup
+offsite_backup_bin_dir: /usr/local/sbin
+
+# --- Google Cloud CLI package source ----------------------------------
+
+offsite_backup_gcloud_apt_key_url: "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+offsite_backup_gcloud_apt_repo: "deb https://packages.cloud.google.com/apt cloud-sdk main"

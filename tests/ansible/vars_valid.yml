@@ -1,0 +1,16 @@
+---
+offsite_backup_enabled: true
+offsite_backup_bucket: example-host-backup
+offsite_backup_prefix: host-a
+offsite_backup_retention_mode: Unlocked
+offsite_backup_tiers:
+  - { name: daily, retain_days: 7, when: always }
+  - { name: weekly, retain_days: 35, when: "weekday:1" }
+  - { name: hourly, retain_days: 2, when: always, name_format: "%Y%m%dT%H" }
+offsite_backup_age_recipients:
+  - age1exampleexampleexampleexampleexampleexampleexampleexampleex
+offsite_backup_paths:
+  - /etc/example
+offsite_backup_pre_command: 'echo dump > "$DUMP_DIR/dump.txt"'
+# Shape only: not a real key.
+offsite_backup_sa_key: '{"type": "service_account", "client_email": "writer@example-project.iam.gserviceaccount.com", "private_key": "placeholder"}'

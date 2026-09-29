@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# <name> <retain_days> <when> [<name_format>]
+{% for tier in offsite_backup_tiers %}
+{{ tier.name }} {{ tier.retain_days | int }} {{ tier.when }}{% if tier.name_format is defined %} {{ tier.name_format }}{% endif %}
+
+{% endfor %}

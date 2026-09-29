@@ -1,0 +1,8 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# Runs before each backup with DUMP_DIR set. Anything written there is
+# archived under offsite-backup-dump/. A non-zero exit fails the run.
+set -euo pipefail
+: "${DUMP_DIR:?DUMP_DIR is not set}"
+
+{{ offsite_backup_pre_command }}

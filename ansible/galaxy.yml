@@ -1,0 +1,14 @@
+namespace: ledurnan
+name: gcs_backup
+version: 0.1.0
+readme: README.md
+authors:
+  - Laurence Durnan
+description: Sending side of the tf-gcs-backup pattern - encrypted, tamper-resistant backups from a host to a Google Cloud Storage bucket it cannot delete from.
+repository: https://github.com/ledurnan/tf-gcs-backup
+tags:
+  - backup
+  - gcs
+  - age
+build_ignore:
+  - "*.tar.gz"

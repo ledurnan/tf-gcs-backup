@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+BUCKET={{ offsite_backup_bucket | quote }}
+PREFIX={{ offsite_backup_prefix | quote }}
+RETENTION_MODE={{ offsite_backup_retention_mode | quote }}
+LIFECYCLE_SLACK_DAYS={{ offsite_backup_lifecycle_slack_days | int }}
+WORK_DIR={{ offsite_backup_work_dir | quote }}
+STATE_DIR={{ offsite_backup_state_dir | quote }}
