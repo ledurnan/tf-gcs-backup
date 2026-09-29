@@ -10,3 +10,4 @@ crash.log
 # Never commit a service account key or an age identity.
 *-sa.json
 *.key
+.build/
