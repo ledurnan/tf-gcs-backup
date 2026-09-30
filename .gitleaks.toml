@@ -142,14 +142,11 @@ regex = '''.*'''
 path = '''(credentials|secrets|passwords|\.aws/credentials|\.netrc|\.git-credentials)$'''
 tags = ["credentials", "config"]
 
-# Global allowlist for safe paths
+# Global allowlist. No directory of this repository is exempt: a key
+# dropped under docs/ or examples/ must still be reported.
 [allowlist]
-description = "Global allowlist for documentation, tests, and examples"
+description = "Third-party trees, binary files and lock files"
 paths = [
-    '''\.md$''',
-    '''\.example$''',
-    '''^docs/''',
-    '''^examples/''',
     '''^\.git/''',
     '''(^|/)node_modules/''',
     '''(^|/)vendor/''',
@@ -165,9 +162,4 @@ paths = [
     '''package-lock\.json$''',
     '''uv\.lock$''',
     '''Pipfile\.lock$'''
-]
-
-# Allowlist for known safe patterns
-regexes = [
-    '''(example|placeholder|dummy|test|mock|sample)'''
 ]
