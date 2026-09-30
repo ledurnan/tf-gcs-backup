@@ -5,11 +5,13 @@
 #
 #   - the APIs impersonation and the modules need
 #   - a custom role for Terraform: manage buckets, custom roles and
-#     service accounts, but never delete any of them, never touch objects
-#     in backup buckets, and never create keys
+#     service accounts, with no permission to delete any of them, touch
+#     objects in backup buckets, or create keys. That stops an apply
+#     doing any of those by accident. It is not a wall: the role can
+#     change IAM, so whoever runs Terraform could grant themselves more.
 #   - a Terraform service account holding that role
-#   - a versioned state bucket, with the service account as its only
-#     non-owner user
+#   - a versioned state bucket in this project, which the service
+#     account can read and write
 #   - permission for the operator's account to impersonate the service
 #     account (and nobody else's)
 #
@@ -21,8 +23,10 @@
 #                     --location <region> --state-bucket <name>
 #                     [--service-account <name>] [--role-id <id>] [--apply]
 #
-# Without --apply it only prints what it would run. Re-running is safe:
-# anything that already exists is left alone.
+# Without --apply it changes nothing: it reads what exists and prints
+# what it would run. Re-running is safe: what already exists is kept, and
+# the role's permissions and the state bucket's settings are brought back
+# to the ones below.
 
 set -euo pipefail
 
@@ -38,7 +42,7 @@ while [ $# -gt 0 ]; do
     --service-account) sa_name="$2"; shift 2 ;;
     --role-id) role_id="$2"; shift 2 ;;
     --apply) apply=1; shift ;;
-    -h | --help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,6 +57,9 @@ g=(gcloud --account="$account" --quiet)
 # Terraform's permissions. Deliberately no *.delete, no storage.objects.*
 # (the state bucket is granted separately, on that bucket only) and no
 # iam.serviceAccountKeys.* (keys are issued out of band, ADR 0002).
+# storage.buckets.setIamPolicy and iam.roles.update are needed to manage
+# the writer role and its binding, and they are why this list is a guard
+# against accidents and not a limit on whoever holds the role.
 permissions=(
   storage.buckets.create
   storage.buckets.get
@@ -70,6 +77,8 @@ permissions=(
   iam.serviceAccounts.update
   resourcemanager.projects.get
 )
+
+role_description="Manage backup buckets, custom roles and service accounts. Holds no delete, object or key permissions; it can change IAM."
 
 step() {
   echo
@@ -98,11 +107,12 @@ step "Terraform's custom role ($role_id)"
 if exists "${g[@]}" iam roles describe "$role_id" --project="$project"; then
   echo "# exists: updating its permissions to the list above"
   run "${g[@]}" iam roles update "$role_id" --project="$project" \
+    --description="$role_description" \
     --permissions="$(IFS=,; echo "${permissions[*]}")"
 else
   run "${g[@]}" iam roles create "$role_id" --project="$project" \
     --title="tf-gcs-backup Terraform (no delete)" \
-    --description="Manage backup buckets, custom roles and service accounts. No delete, no objects, no keys." \
+    --description="$role_description" \
     --permissions="$(IFS=,; echo "${permissions[*]}")"
 fi
 
@@ -121,15 +131,29 @@ run "${g[@]}" projects add-iam-policy-binding "$project" \
   --role="projects/$project/roles/$role_id" --condition=None
 
 step "State bucket (gs://$state_bucket)"
-if exists "${g[@]}" storage buckets describe "gs://$state_bucket" --project="$project"; then
-  echo "# exists"
+# Bucket names are global, so a bucket answering to this name may belong
+# to someone else's project, and state must never go there. --project
+# doesn't narrow the lookup: compare the bucket's own project number.
+if bucket_project="$("${g[@]}" storage buckets describe "gs://$state_bucket" \
+  --raw --format='value(projectNumber)' 2>/dev/null)"; then
+  project_number="$("${g[@]}" projects describe "$project" --format='value(projectNumber)')"
+  if [ -z "$bucket_project" ] || [ "$bucket_project" != "$project_number" ]; then
+    echo "gs://$state_bucket exists in project number ${bucket_project:-(unknown)}, not in $project ($project_number)." >&2
+    echo "Nothing more was changed. Choose another --state-bucket." >&2
+    exit 1
+  fi
+  echo "# exists in $project. Who can use it now, besides the grant below:"
+  "${g[@]}" storage buckets get-iam-policy "gs://$state_bucket" \
+    --format='table[no-heading](bindings.role, bindings.members.list())' | sed 's/^/#   /'
 else
   run "${g[@]}" storage buckets create "gs://$state_bucket" --project="$project" \
     --location="$location" --default-storage-class=STANDARD \
     --uniform-bucket-level-access --public-access-prevention
 fi
-# Old versions of the state file are the undo for a bad apply.
-run "${g[@]}" storage buckets update "gs://$state_bucket" --project="$project" --versioning
+# Old versions of the state file are the undo for a bad apply. The access
+# settings are repeated here so a bucket that already existed gets them.
+run "${g[@]}" storage buckets update "gs://$state_bucket" --project="$project" \
+  --versioning --uniform-bucket-level-access --public-access-prevention
 
 step "Let the service account read and write state, in the state bucket only"
 run "${g[@]}" storage buckets add-iam-policy-binding "gs://$state_bucket" \
