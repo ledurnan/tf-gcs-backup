@@ -1,0 +1,26 @@
+---
+# Example: back up a host's configuration files.
+# Values marked FROM TERRAFORM come from the example's outputs.
+- name: Off-site backup for a configuration host
+  hosts: config_hosts
+  become: true
+  roles:
+    - role: ledurnan.gcs_backup.offsite_backup
+      vars:
+        offsite_backup_enabled: true
+        offsite_backup_bucket: yourorg-backup-config-host        # FROM TERRAFORM
+        offsite_backup_retention_mode: Locked
+        # FROM TERRAFORM: same names and retain_days as the module's tiers.
+        offsite_backup_tiers:
+          - { name: daily, retain_days: 7, when: always }
+          - { name: weekly, retain_days: 90, when: "weekday:7" }
+          - { name: monthly, retain_days: 365, when: "monthday:01" }
+        offsite_backup_paths:
+          - /etc/letsencrypt
+          - /etc/ssh
+          - /root
+        offsite_backup_age_recipients:
+          - "{{ backup_age_operator_recipient }}"
+          - "{{ backup_age_recovery_recipient }}"
+        offsite_backup_sa_key: "{{ vault_backup_sa_key }}"
+        offsite_backup_report_url: "{{ vault_backup_report_url }}"

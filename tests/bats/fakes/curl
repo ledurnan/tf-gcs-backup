@@ -1,0 +1,13 @@
+#!/bin/bash
+# Fake curl: records the URL and body it would have sent.
+set -eu
+url="" body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) body="$2"; shift 2 ;;
+    -H|-X|-m|-o) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+echo "$url $body" >>"$FAKE_CURL_LOG"

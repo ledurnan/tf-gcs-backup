@@ -1,0 +1,56 @@
+#!/bin/bash
+#
+# tf-with-identity: run Terraform as a pinned service account, minted from
+# a pinned Google account, without application-default credentials.
+#
+# Application-default credentials are one file per machine, so on a
+# workstation with several Google accounts (personal and work) Terraform
+# would use whichever logged in last. This reads the identity from a
+# .tf-identity file in the current directory instead:
+#
+#   ACCOUNT=you@example.com                                   # your own account
+#   SERVICE_ACCOUNT=tf-gcs-backup@project.iam.gserviceaccount.com
+#
+# and hands Terraform a one-hour token for SERVICE_ACCOUNT, minted by
+# ACCOUNT through impersonation. Both the provider and the gcs backend
+# read GOOGLE_OAUTH_ACCESS_TOKEN.
+#
+# Usage: tf-with-identity <terraform arguments>
+#   e.g. tf-with-identity init
+#        tf-with-identity plan
+#
+# Copy this script next to your configuration, or call it from a clone of
+# tf-gcs-backup.
+
+set -euo pipefail
+
+conf="${TF_IDENTITY_FILE:-.tf-identity}"
+[ -f "$conf" ] || { echo "no $conf in $(pwd): see the header of $0" >&2; exit 2; }
+
+ACCOUNT="" SERVICE_ACCOUNT=""
+while IFS='=' read -r key value; do
+  case "$key" in
+    ACCOUNT) ACCOUNT="$value" ;;
+    SERVICE_ACCOUNT) SERVICE_ACCOUNT="$value" ;;
+    '' | \#*) ;;
+    *) echo "unknown key in $conf: $key" >&2; exit 2 ;;
+  esac
+done <"$conf"
+
+[ -n "$ACCOUNT" ] || { echo "ACCOUNT is not set in $conf" >&2; exit 2; }
+[ -n "$SERVICE_ACCOUNT" ] || { echo "SERVICE_ACCOUNT is not set in $conf" >&2; exit 2; }
+
+# Never fall back to application-default credentials or another account.
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CREDENTIALS GOOGLE_IMPERSONATE_SERVICE_ACCOUNT
+
+token="$(gcloud auth print-access-token \
+  --account="$ACCOUNT" \
+  --impersonate-service-account="$SERVICE_ACCOUNT" 2>/dev/null)" || {
+  echo "could not mint a token for $SERVICE_ACCOUNT as $ACCOUNT." >&2
+  echo "Is $ACCOUNT logged in (gcloud auth login $ACCOUNT), and does it hold" >&2
+  echo "Service Account Token Creator on $SERVICE_ACCOUNT?" >&2
+  exit 1
+}
+
+echo "terraform as $SERVICE_ACCOUNT (via $ACCOUNT)" >&2
+GOOGLE_OAUTH_ACCESS_TOKEN="$token" exec terraform "$@"

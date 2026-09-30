@@ -1,0 +1,32 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Encrypted off-site backup to gs://{{ offsite_backup_bucket }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=OFFSITE_BACKUP_CONF_DIR={{ offsite_backup_conf_dir }}
+Environment=OFFSITE_BACKUP_STATE_DIR={{ offsite_backup_state_dir }}
+ExecStart={{ offsite_backup_bin_dir }}/offsite-backup
+# Reports every run, success or failure. REPORT_URL is a credential, so
+# it lives in the root-only conf dir, not in this world-readable unit.
+EnvironmentFile=-{{ offsite_backup_conf_dir }}/report.env
+ExecStopPost={{ offsite_backup_bin_dir }}/offsite-backup-report
+
+# The backup reads whatever paths it's given, so ProtectSystem and
+# ProtectHome would break it. What's safe to narrow is narrowed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Stay out of the way of the host's real work.
+Nice=10
+IOSchedulingClass=idle
+
+TimeoutStartSec={{ offsite_backup_timeout }}

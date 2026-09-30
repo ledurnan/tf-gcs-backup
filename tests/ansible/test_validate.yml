@@ -1,0 +1,16 @@
+---
+# Runs the role's validation against localhost: changes nothing.
+# Driven by tests/bats/role_validate.bats, which passes each invalid
+# case as extra vars and expects the play to fail.
+- name: Validate an offsite_backup configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../ansible/roles/offsite_backup/defaults/main.yml
+    - vars_valid.yml
+  tasks:
+    - name: Validate
+      ansible.builtin.include_role:
+        name: offsite_backup
+        tasks_from: validate.yml

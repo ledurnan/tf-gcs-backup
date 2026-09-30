@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Schedule for the off-site backup
+
+[Timer]
+OnCalendar={{ offsite_backup_on_calendar }}
+RandomizedDelaySec={{ offsite_backup_randomized_delay }}
+# Catch up after downtime: a host that was off at the scheduled time
+# still takes its backup when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

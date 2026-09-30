@@ -1,0 +1,113 @@
+---
+# Renders the role's configuration and runs the real backup script on it
+# against the fakes in tests/bats/fakes: proves the templates and the
+# script agree. Changes nothing outside a temporary directory.
+- name: The rendered configuration drives the backup script
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../ansible/roles/offsite_backup/defaults/main.yml
+    - vars_valid.yml
+  vars:
+    role_dir: "{{ playbook_dir }}/../../ansible/roles/offsite_backup"
+    fakes: "{{ playbook_dir }}/../bats/fakes"
+  tasks:
+    - name: Make a scratch area
+      ansible.builtin.tempfile:
+        state: directory
+      register: scratch
+
+    - name: Point the role's paths into the scratch area
+      ansible.builtin.set_fact:
+        offsite_backup_conf_dir: "{{ scratch.path }}/conf"
+        offsite_backup_state_dir: "{{ scratch.path }}/state"
+        offsite_backup_work_dir: "{{ scratch.path }}/work"
+        offsite_backup_paths: ["{{ scratch.path }}/data"]
+
+    - name: Create directories and data
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ offsite_backup_conf_dir }}"
+        - "{{ scratch.path }}/data"
+        - "{{ scratch.path }}/gcs"
+
+    - name: Add a file to back up
+      ansible.builtin.copy:
+        content: "hello\n"
+        dest: "{{ scratch.path }}/data/file.txt"
+        mode: "0600"
+
+    - name: Render the configuration files
+      ansible.builtin.template:
+        src: "{{ role_dir }}/templates/{{ item }}.j2"
+        dest: "{{ offsite_backup_conf_dir }}/{{ item }}"
+        mode: "0600"
+      loop: [backup.conf, tiers, paths, recipients]
+
+    - name: Render the pre-backup hook
+      ansible.builtin.template:
+        src: "{{ role_dir }}/templates/pre-backup.j2"
+        dest: "{{ offsite_backup_conf_dir }}/pre-backup"
+        mode: "0700"
+
+    - name: Write the fake bucket's expiry rules to match the tiers
+      ansible.builtin.copy:
+        dest: "{{ scratch.path }}/bucket.json"
+        mode: "0600"
+        content: >-
+          {{ {'lifecycle_config': {'rule': rules}} | to_json }}
+      vars:
+        rules: >-
+          {{ offsite_backup_tiers | map(attribute='name')
+             | zip(offsite_backup_tiers | map(attribute='retain_days'))
+             | map('join', ':') | map('regex_replace', '^(.*):(.*)$', '{"action":{"type":"Delete"},"condition":{"matchesPrefix":["\1/"],"age":\2}}')
+             | map('from_json') | list }}
+
+    # Ages are retain_days, so the rendered slack (1) makes the contract
+    # fail: this proves the script reads the rendered slack.
+    - name: Run the script against a bucket whose ages leave no slack
+      ansible.builtin.command: "{{ role_dir }}/files/offsite-backup --check-contract"
+      environment: &env
+        PATH: "{{ fakes }}:{{ ansible_env.PATH | default(lookup('env', 'PATH')) }}"
+        OFFSITE_BACKUP_CONF_DIR: "{{ offsite_backup_conf_dir }}"
+        OFFSITE_BACKUP_NOW: "1780272000"
+        FAKE_GCS_DIR: "{{ scratch.path }}/gcs"
+        FAKE_GCS_LOG: "{{ scratch.path }}/gcloud.log"
+        FAKE_BUCKET_JSON: "{{ scratch.path }}/bucket.json"
+      register: contract_broken
+      changed_when: false
+      failed_when: contract_broken.rc == 0
+
+    - name: Set the slack to zero, matching the fake bucket
+      ansible.builtin.lineinfile:
+        path: "{{ offsite_backup_conf_dir }}/backup.conf"
+        regexp: "^LIFECYCLE_SLACK_DAYS="
+        line: "LIFECYCLE_SLACK_DAYS=0"
+
+    - name: Run a backup from the rendered configuration
+      ansible.builtin.command: "{{ role_dir }}/files/offsite-backup"
+      environment: *env
+      changed_when: false
+
+    - name: List what was uploaded
+      ansible.builtin.find:
+        paths: "{{ scratch.path }}/gcs"
+        recurse: true
+      register: uploaded
+
+    - name: Assert every due tier was uploaded, including the custom format
+      ansible.builtin.assert:
+        that:
+          - uploaded.files | map(attribute='path') | select('search', 'daily/host-a/2026-06-01.tar.age$') | list | length == 1
+          - uploaded.files | map(attribute='path') | select('search', 'weekly/host-a/2026-W23.tar.age$') | list | length == 1
+          - uploaded.files | map(attribute='path') | select('search', 'hourly/host-a/20260601T00.tar.age$') | list | length == 1
+        quiet: true
+
+    - name: Remove the scratch area
+      ansible.builtin.file:
+        path: "{{ scratch.path }}"
+        state: absent

@@ -1,0 +1,33 @@
+---
+# Example: back up a database by dumping it first. Never archive a live
+# database's files: the copy is torn. The dump runs before each backup
+# and lands in the archive under offsite-backup-dump/.
+- name: Off-site backup for a database host
+  hosts: database_hosts
+  become: true
+  roles:
+    - role: ledurnan.gcs_backup.offsite_backup
+      vars:
+        offsite_backup_enabled: true
+        offsite_backup_bucket: yourorg-backup-database-host      # FROM TERRAFORM
+        # Personal data under a 35-day promise: start Unlocked, switch to
+        # Locked once a restore test has passed.
+        offsite_backup_retention_mode: Unlocked
+        offsite_backup_tiers:
+          - { name: daily, retain_days: 7, when: always }
+          - { name: weekly, retain_days: 28, when: "weekday:7" }
+        # MariaDB/MySQL in a container. For PostgreSQL, for example:
+        #   docker exec app-db pg_dump -U app -Fc app > "$DUMP_DIR/app.dump"
+        offsite_backup_pre_command: >-
+          docker exec app-mariadb sh -c
+          'exec mariadb-dump --all-databases --single-transaction -uroot -p"$MARIADB_ROOT_PASSWORD"'
+          > "$DUMP_DIR/all-databases.sql"
+        # Files the application keeps outside the database.
+        offsite_backup_paths:
+          - /srv/app/config
+        offsite_backup_timeout: 2h
+        offsite_backup_age_recipients:
+          - "{{ backup_age_operator_recipient }}"
+          - "{{ backup_age_recovery_recipient }}"
+        offsite_backup_sa_key: "{{ vault_backup_sa_key }}"
+        offsite_backup_report_url: "{{ vault_backup_report_url }}"

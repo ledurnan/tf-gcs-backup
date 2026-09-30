@@ -1,0 +1,19 @@
+#!/bin/bash
+# Fake age: "encrypts" by copying, so tests can inspect the archive.
+# Records the recipients file it was given.
+set -eu
+out="" recipients="" input=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -R) recipients="$2"; shift 2 ;;
+    -r) recipients="$2"; shift 2 ;;
+    -i) shift 2 ;;
+    -d) shift ;;
+    -o) out="$2"; shift 2 ;;
+    *) input="$1"; shift ;;
+  esac
+done
+[ -n "${FAKE_AGE_FAIL:-}" ] && exit 1
+[ -n "$recipients" ] && echo "recipients=$recipients" >>"${FAKE_AGE_LOG:-/dev/null}"
+if [ -n "$input" ]; then exec <"$input"; fi
+if [ -n "$out" ]; then cat >"$out"; else cat; fi

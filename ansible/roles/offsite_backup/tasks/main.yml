@@ -1,0 +1,195 @@
+---
+# Sending side of the tf-gcs-backup pattern.
+
+- name: Report that off-site backup is off on this host
+  ansible.builtin.debug:
+    msg: >-
+      offsite_backup_enabled is false: no off-site backup is configured on
+      this host, and nothing on it is being copied off-site.
+  when: not (offsite_backup_enabled | bool)
+
+- name: Configure the off-site backup
+  when: offsite_backup_enabled | bool
+  block:
+    - name: Assert the host is Debian or Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+        fail_msg: >-
+          This role installs its packages with apt and supports Debian and
+          Ubuntu only (os_family is {{ ansible_facts['os_family'] }}).
+        quiet: true
+
+    - name: Validate the configuration
+      ansible.builtin.include_tasks: validate.yml
+
+    - name: Install the tools the backup uses
+      ansible.builtin.apt:
+        name:
+          - age
+          - python3
+          - curl
+          - tar
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install the Google Cloud apt signing key
+      ansible.builtin.get_url:
+        url: "{{ offsite_backup_gcloud_apt_key_url }}"
+        dest: /usr/share/keyrings/cloud.google.asc
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Add the Google Cloud apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          {{ offsite_backup_gcloud_apt_repo
+             | regex_replace('^deb ', 'deb [signed-by=/usr/share/keyrings/cloud.google.asc] ') }}
+        filename: google-cloud-sdk
+        state: present
+        update_cache: true
+      register: offsite_backup_gcloud_repo
+
+    # In a dry run the repository wasn't really added, so apt can't see
+    # the package yet. Skip the install in exactly that case; the repo
+    # diff above already shows the intent.
+    - name: Install the Google Cloud CLI
+      ansible.builtin.apt:
+        name: google-cloud-cli
+        state: present
+      when: not (ansible_check_mode and offsite_backup_gcloud_repo is changed)
+
+    - name: Create the backup directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ offsite_backup_conf_dir }}"
+        - "{{ offsite_backup_state_dir }}"
+        - "{{ offsite_backup_work_dir }}"
+
+    - name: Write the backup configuration
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ offsite_backup_conf_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - backup.conf
+        - tiers
+        - paths
+        - recipients
+
+    - name: Install the pre-backup hook
+      ansible.builtin.template:
+        src: pre-backup.j2
+        dest: "{{ offsite_backup_conf_dir }}/pre-backup"
+        owner: root
+        group: root
+        mode: "0700"
+      when: offsite_backup_pre_command | length > 0
+
+    - name: Remove a pre-backup hook that is no longer configured
+      ansible.builtin.file:
+        path: "{{ offsite_backup_conf_dir }}/pre-backup"
+        state: absent
+      when: offsite_backup_pre_command | length == 0
+
+    - name: Install the service account key
+      ansible.builtin.copy:
+        content: "{{ offsite_backup_sa_key }}"
+        dest: "{{ offsite_backup_conf_dir }}/gcp-sa.json"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    # The heartbeat URL is usually its own credential: root-only, and no
+    # diff, so --check --diff doesn't print it.
+    - name: Install the report URL
+      ansible.builtin.copy:
+        content: "REPORT_URL={{ offsite_backup_report_url | quote }}\n"
+        dest: "{{ offsite_backup_conf_dir }}/report.env"
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+
+    - name: Install the backup and report scripts
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ offsite_backup_bin_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0750"
+      loop:
+        - offsite-backup
+        - offsite-backup-report
+
+    - name: Install the systemd unit and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - offsite-backup.service
+        - offsite-backup.timer
+      notify: Reload systemd for offsite-backup
+
+    - name: Flush handlers so the timer enables against the current unit
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable the backup timer
+      ansible.builtin.systemd:
+        name: offsite-backup.timer
+        enabled: true
+        state: started
+      when: not ansible_check_mode
+
+    # gcloud's CLI doesn't read GOOGLE_APPLICATION_CREDENTIALS (that's for
+    # client libraries): the key has to be activated into a gcloud config
+    # directory, kept under the state dir rather than root's home.
+    - name: Check which account gcloud is using
+      ansible.builtin.command: gcloud auth list --format=value(account)
+      environment:
+        CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
+      register: offsite_backup_gcloud_accounts
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Activate the service account for gcloud
+      ansible.builtin.command: >-
+        gcloud auth activate-service-account
+        --key-file={{ offsite_backup_conf_dir }}/gcp-sa.json
+      environment:
+        CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
+      when:
+        - not ansible_check_mode
+        - (offsite_backup_sa_key | from_json).client_email not in offsite_backup_gcloud_accounts.stdout_lines | default([])
+      changed_when: true
+      no_log: true
+
+    # Prove now that the credential reaches the bucket and that the tier
+    # contract holds, rather than finding out from the first failed run.
+    - name: Verify the credential can reach the bucket
+      ansible.builtin.command: gcloud storage ls gs://{{ offsite_backup_bucket }}/
+      environment:
+        CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Verify the tier contract against the bucket
+      ansible.builtin.command: "{{ offsite_backup_bin_dir }}/offsite-backup --check-contract"
+      environment:
+        OFFSITE_BACKUP_CONF_DIR: "{{ offsite_backup_conf_dir }}"
+      changed_when: false
+      when: not ansible_check_mode
