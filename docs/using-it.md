@@ -3,6 +3,13 @@
 From nothing to a verified, locked backup for one host. Repeat steps 2 to
 7 for each further host; step 1 is once per Google Cloud project.
 
+## 0. Once per project: identity and state
+
+Run [`scripts/bootstrap-project`](../scripts/bootstrap-project) and read
+[`identity-and-state.md`](identity-and-state.md): Terraform runs as a
+dedicated service account through `scripts/tf-with-identity`, never on
+application-default credentials.
+
 ## 1. Once per project: the write-only role
 
 ```hcl

@@ -1,0 +1,159 @@
+#!/bin/bash
+#
+# bootstrap-project: one-off setup of a Google Cloud project for this
+# pattern, run by a project owner as themselves. Creates, if missing:
+#
+#   - the APIs impersonation and the modules need
+#   - a custom role for Terraform: manage buckets, custom roles and
+#     service accounts, but never delete any of them, never touch objects
+#     in backup buckets, and never create keys
+#   - a Terraform service account holding that role
+#   - a versioned state bucket, with the service account as its only
+#     non-owner user
+#   - permission for the operator's account to impersonate the service
+#     account (and nobody else's)
+#
+# Every gcloud call names --account explicitly, so a workstation with
+# several Google accounts (personal and work) can't use the wrong one.
+#
+# Usage:
+#   bootstrap-project --project <id> --account <operator email>
+#                     --location <region> --state-bucket <name>
+#                     [--service-account <name>] [--role-id <id>] [--apply]
+#
+# Without --apply it only prints what it would run. Re-running is safe:
+# anything that already exists is left alone.
+
+set -euo pipefail
+
+project="" account="" location="" state_bucket=""
+sa_name="tf-gcs-backup" role_id="tfGcsBackupAdmin" apply=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project) project="$2"; shift 2 ;;
+    --account) account="$2"; shift 2 ;;
+    --location) location="$2"; shift 2 ;;
+    --state-bucket) state_bucket="$2"; shift 2 ;;
+    --service-account) sa_name="$2"; shift 2 ;;
+    --role-id) role_id="$2"; shift 2 ;;
+    --apply) apply=1; shift ;;
+    -h | --help) sed -n '2,26p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+for v in project account location state_bucket; do
+  [ -n "${!v}" ] || { echo "--${v//_/-} is required" >&2; exit 2; }
+done
+
+sa_email="${sa_name}@${project}.iam.gserviceaccount.com"
+g=(gcloud --account="$account" --quiet)
+
+# Terraform's permissions. Deliberately no *.delete, no storage.objects.*
+# (the state bucket is granted separately, on that bucket only) and no
+# iam.serviceAccountKeys.* (keys are issued out of band, ADR 0002).
+permissions=(
+  storage.buckets.create
+  storage.buckets.get
+  storage.buckets.list
+  storage.buckets.update
+  storage.buckets.getIamPolicy
+  storage.buckets.setIamPolicy
+  iam.roles.get
+  iam.roles.list
+  iam.roles.create
+  iam.roles.update
+  iam.serviceAccounts.get
+  iam.serviceAccounts.list
+  iam.serviceAccounts.create
+  iam.serviceAccounts.update
+  resourcemanager.projects.get
+)
+
+step() {
+  echo
+  echo "# $1"
+}
+
+run() {
+  printf '%q ' "$@"
+  echo
+  if [ "$apply" -eq 1 ]; then
+    "$@"
+  fi
+}
+
+exists() {
+  "$@" >/dev/null 2>&1
+}
+
+[ "$apply" -eq 1 ] || echo "# Dry run: nothing is changed. Re-run with --apply to execute."
+
+step "APIs"
+run "${g[@]}" services enable iam.googleapis.com iamcredentials.googleapis.com \
+  cloudresourcemanager.googleapis.com storage.googleapis.com --project="$project"
+
+step "Terraform's custom role ($role_id)"
+if exists "${g[@]}" iam roles describe "$role_id" --project="$project"; then
+  echo "# exists: updating its permissions to the list above"
+  run "${g[@]}" iam roles update "$role_id" --project="$project" \
+    --permissions="$(IFS=,; echo "${permissions[*]}")"
+else
+  run "${g[@]}" iam roles create "$role_id" --project="$project" \
+    --title="tf-gcs-backup Terraform (no delete)" \
+    --description="Manage backup buckets, custom roles and service accounts. No delete, no objects, no keys." \
+    --permissions="$(IFS=,; echo "${permissions[*]}")"
+fi
+
+step "Terraform's service account ($sa_email)"
+if exists "${g[@]}" iam service-accounts describe "$sa_email" --project="$project"; then
+  echo "# exists"
+else
+  run "${g[@]}" iam service-accounts create "$sa_name" --project="$project" \
+    --display-name="tf-gcs-backup Terraform" \
+    --description="Used by Terraform through impersonation only. Never give it a key."
+fi
+
+step "Grant the role to the service account on the project"
+run "${g[@]}" projects add-iam-policy-binding "$project" \
+  --member="serviceAccount:$sa_email" \
+  --role="projects/$project/roles/$role_id" --condition=None
+
+step "State bucket (gs://$state_bucket)"
+if exists "${g[@]}" storage buckets describe "gs://$state_bucket" --project="$project"; then
+  echo "# exists"
+else
+  run "${g[@]}" storage buckets create "gs://$state_bucket" --project="$project" \
+    --location="$location" --default-storage-class=STANDARD \
+    --uniform-bucket-level-access --public-access-prevention
+fi
+# Old versions of the state file are the undo for a bad apply.
+run "${g[@]}" storage buckets update "gs://$state_bucket" --project="$project" --versioning
+
+step "Let the service account read and write state, in the state bucket only"
+run "${g[@]}" storage buckets add-iam-policy-binding "gs://$state_bucket" \
+  --project="$project" \
+  --member="serviceAccount:$sa_email" --role=roles/storage.objectAdmin
+
+step "Let $account impersonate the service account"
+run "${g[@]}" iam service-accounts add-iam-policy-binding "$sa_email" \
+  --project="$project" \
+  --member="user:$account" --role=roles/iam.serviceAccountTokenCreator
+
+cat <<EOF
+
+# Then, in the consuming configuration:
+#
+#   .tf-identity (committed; contains no secrets):
+#     ACCOUNT=$account
+#     SERVICE_ACCOUNT=$sa_email
+#
+#   backend "gcs" {
+#     bucket = "$state_bucket"
+#     prefix = "<consumer>/<name>"
+#   }
+#
+# and run Terraform through scripts/tf-with-identity. New permissions
+# can take a minute or two to apply to impersonation.
+EOF
