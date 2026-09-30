@@ -112,5 +112,7 @@ owner. Objects written while Unlocked stay Unlocked.
 
 ## Then, on a schedule
 
-Run `scripts/restore-test` regularly (with `--report-url` to alert when
-it fails), and after any change to paths, the dump or the keys.
+Run `scripts/restore-test` regularly (with `--max-age` and
+`--report-url-file` to alert when it fails or backups stop), and after
+any change to paths, the dump or the keys. See
+[`restore.md`](restore.md#proving-it-before-you-need-it).

@@ -12,12 +12,14 @@ You need:
 ## 1. Find the object
 
 ```bash
-gcloud storage ls gs://<bucket>/<tier>/<prefix>/
+gcloud storage ls -l gs://<bucket>/<tier>/<prefix>/
 ```
 
 Object names are dated within each tier (`daily/<prefix>/2026-06-03.tar.age`,
 `weekly/<prefix>/2026-W23.tar.age`, `monthly/<prefix>/2026-06.tar.age` by
-default), so the last one listed is the newest.
+default). Go by the creation time in the second column, not by the name:
+the host chooses the names, and a host that was compromised could have
+left an object whose name sorts last.
 
 ## 2. Fetch and decrypt, into a scratch directory
 
@@ -46,11 +48,20 @@ application keeps.
 scripts/restore-test --bucket <bucket> --prefix <prefix> --tier daily \
   --identity operator.key \
   --expect offsite-backup-dump/ --expect etc/letsencrypt/ \
-  --report-url https://heartbeat.example/<id>
+  --max-age 26 --report-url-file restore-test.url
 ```
 
-It fetches the newest object, decrypts it, lists it, checks each
-`--expect` entry is present, and reports the result to the URL. It
-extracts nothing. Schedule it where an operator key is available (never
-on the backed-up host), and run it after any change to paths, the dump or
-the keys.
+It fetches the most recently created backup, decrypts it, lists it,
+checks each `--expect` entry is present, and reports the result to the
+heartbeat URL. It extracts nothing. `--max-age` (in hours) fails the test
+when the newest backup is older than the tier's schedule allows, so
+backups that have stopped don't pass on an old object.
+
+The heartbeat URL is a credential: anyone who has it can report "ok". So
+it is read from a file (its first line), never given as an argument,
+where other users of the machine could see it. Keep the file readable
+only by its owner (`chmod 600`), or set `RESTORE_TEST_REPORT_URL` in the
+environment instead.
+
+Schedule it where an operator key is available (never on the backed-up
+host), and run it after any change to paths, the dump or the keys.
