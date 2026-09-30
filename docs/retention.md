@@ -16,6 +16,15 @@ A locked object uploaded by mistake, containing the wrong data or too
 much of it, stays for its full tier. There is no support ticket that
 removes it.
 
+"Its full tier" is what the backup script asks for. The retain-until
+date and the mode are set by the host on each upload, and the bucket
+doesn't cap either, or limit object names to the tier prefixes. A host
+whose key is misused could ask for a longer retention than its tier, or
+write outside the tier prefixes, where no rule expires objects. It still
+can't delete or shorten anything. Look at what is in a bucket
+(`gcloud storage ls -L`) after an incident on its host, before assuming
+it will empty itself on schedule.
+
 ## Personal data
 
 If a host holds personal data, the longest tier is how long that data
