@@ -19,6 +19,6 @@ output "lifecycle_slack_days" {
 }
 
 output "key_issue_command" {
-  description = "The one-off command that issues the host's key. Run it deliberately, put the key in your secret store, then delete the file."
-  value       = "gcloud iam service-accounts keys create ./${var.service_account_id}.json --iam-account=${google_service_account.writer.email} --project=${var.project}"
+  description = "The one-off command that issues the host's key. Run it deliberately, put the key in your secret store, then delete the file. The file name ends in -sa.json, which this repository's .gitignore covers; make sure yours does too."
+  value       = "gcloud iam service-accounts keys create ./${var.service_account_id}-sa.json --iam-account=${google_service_account.writer.email} --project=${var.project}"
 }

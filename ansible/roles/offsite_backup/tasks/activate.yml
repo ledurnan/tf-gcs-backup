@@ -1,0 +1,30 @@
+---
+# gcloud's CLI doesn't read GOOGLE_APPLICATION_CREDENTIALS (that's for
+# client libraries): the key has to be activated into a gcloud config
+# directory, kept under the state dir rather than root's home. The backup
+# authenticates from that directory only, never from the key file.
+
+- name: Check which account gcloud is using
+  ansible.builtin.command: gcloud auth list --format=value(account)
+  environment:
+    CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
+  register: offsite_backup_gcloud_accounts
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+# A rotated key belongs to the same account, so the account being listed
+# already says nothing about which key gcloud holds: a changed key file
+# is activated again.
+- name: Activate the service account key
+  ansible.builtin.command: >-
+    gcloud auth activate-service-account
+    --key-file={{ offsite_backup_conf_dir }}/gcp-sa.json
+  environment:
+    CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
+  when:
+    - not ansible_check_mode
+    - offsite_backup_sa_key_file is changed
+      or (offsite_backup_sa_key | from_json).client_email not in offsite_backup_gcloud_accounts.stdout_lines | default([])
+  changed_when: true
+  no_log: true

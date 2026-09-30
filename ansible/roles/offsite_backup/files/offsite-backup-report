@@ -35,7 +35,13 @@ if len(sys.argv) > 2:
     b["detail"] = sys.argv[2][:2000]
 print(json.dumps(b, separators=(",", ":")))' "$@")" || exit 0
 
-curl -fsS -m 10 -o /dev/null -X POST "${REPORT_URL}" \
-  -H 'Content-Type: application/json' -d "${body}" \
+# The URL is a credential: it goes to curl on stdin, never as an
+# argument, where any local user could read it from the process list
+# (printf is a builtin).
+url="${REPORT_URL//\\/\\\\}"
+url="${url//\"/\\\"}"
+printf 'url = "%s"\n' "$url" \
+  | curl -fsS -m 10 -o /dev/null -X POST --config - \
+    -H 'Content-Type: application/json' -d "${body}" \
   || echo "warning: could not send the run report" >&2
 exit 0

@@ -4,6 +4,8 @@
 #   FAKE_GCS_LOG          every call is appended here
 #   FAKE_BUCKET_JSON      file returned by `storage buckets describe`
 #   FAKE_REMOTE_SIZE      if set, `objects describe` reports this size
+#   FAKE_GCLOUD_ACCOUNTS  file listing the accounts `auth list` reports
+# An object's creation time is its file's modification time.
 set -eu
 echo "gcloud $*" >>"$FAKE_GCS_LOG"
 case "$1 $2 $3" in
@@ -22,8 +24,16 @@ case "$1 $2 $3" in
   "storage objects describe")
     obj="${4#gs://}"
     if [ -n "${FAKE_REMOTE_SIZE:-}" ]; then echo "$FAKE_REMOTE_SIZE"; else stat -c %s "$FAKE_GCS_DIR/$obj"; fi ;;
+  "storage ls -l")
+    prefix="${4#gs://}"
+    TZ=UTC find "$FAKE_GCS_DIR/$prefix" -maxdepth 1 -type f \
+      -printf "%10s  %TY-%Tm-%TdT%TH:%TM:%.2TSZ  gs://$prefix%f\n" 2>/dev/null
+    echo "TOTAL: some objects" ;;
   "storage ls "*)
     prefix="${3#gs://}"
     find "$FAKE_GCS_DIR/$prefix" -maxdepth 1 -type f -printf "gs://$prefix%f\n" 2>/dev/null ;;
+  "auth list "*)
+    cat "${FAKE_GCLOUD_ACCOUNTS:-/dev/null}" 2>/dev/null || true ;;
+  "auth activate-service-account "*) ;;
   *) echo "fake gcloud: unhandled: $*" >&2; exit 2 ;;
 esac

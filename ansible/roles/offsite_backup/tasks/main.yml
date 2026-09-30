@@ -68,6 +68,8 @@
         owner: root
         group: root
         mode: "0700"
+        # A symlink at one of these paths is an error, never followed.
+        follow: false
       loop:
         - "{{ offsite_backup_conf_dir }}"
         - "{{ offsite_backup_state_dir }}"
@@ -109,6 +111,7 @@
         group: root
         mode: "0600"
       no_log: true
+      register: offsite_backup_sa_key_file
 
     # The heartbeat URL is usually its own credential: root-only, and no
     # diff, so --check --diff doesn't print it.
@@ -154,29 +157,8 @@
         state: started
       when: not ansible_check_mode
 
-    # gcloud's CLI doesn't read GOOGLE_APPLICATION_CREDENTIALS (that's for
-    # client libraries): the key has to be activated into a gcloud config
-    # directory, kept under the state dir rather than root's home.
-    - name: Check which account gcloud is using
-      ansible.builtin.command: gcloud auth list --format=value(account)
-      environment:
-        CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
-      register: offsite_backup_gcloud_accounts
-      changed_when: false
-      check_mode: false
-      failed_when: false
-
     - name: Activate the service account for gcloud
-      ansible.builtin.command: >-
-        gcloud auth activate-service-account
-        --key-file={{ offsite_backup_conf_dir }}/gcp-sa.json
-      environment:
-        CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
-      when:
-        - not ansible_check_mode
-        - (offsite_backup_sa_key | from_json).client_email not in offsite_backup_gcloud_accounts.stdout_lines | default([])
-      changed_when: true
-      no_log: true
+      ansible.builtin.include_tasks: activate.yml
 
     # Prove now that the credential reaches the bucket and that the tier
     # contract holds, rather than finding out from the first failed run.

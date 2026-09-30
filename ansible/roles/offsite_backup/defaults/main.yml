@@ -85,8 +85,10 @@ offsite_backup_randomized_delay: "1h"
 offsite_backup_timeout: "30min"
 # Where the encrypted archive is built. Needs free space for one
 # compressed, encrypted copy of everything backed up; keep it off tmpfs
-# for large data.
-offsite_backup_work_dir: /var/tmp/offsite-backup
+# for large data. Keep it under a directory only root can write to: in
+# a shared one such as /var/tmp, another user could create the path
+# first.
+offsite_backup_work_dir: /var/lib/offsite-backup/work
 
 # --- Locations on the host --------------------------------------------
 

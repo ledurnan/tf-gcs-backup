@@ -1,0 +1,18 @@
+---
+# Runs the role's gcloud activation tasks against the fake gcloud in
+# tests/bats/fakes. key_changed stands for whether the key file on the
+# host was just rewritten.
+- name: The service account key is activated when it should be
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../ansible/roles/offsite_backup/defaults/main.yml
+    - vars_valid.yml
+  vars:
+    key_changed: false
+    offsite_backup_sa_key_file:
+      changed: "{{ key_changed | bool }}"
+  tasks:
+    - name: Run the activation tasks
+      ansible.builtin.include_tasks: ../../ansible/roles/offsite_backup/tasks/activate.yml

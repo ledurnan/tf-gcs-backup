@@ -55,14 +55,16 @@ Keys never go through Terraform, so they never reach state
 `key_issue_command` output is the command:
 
 ```bash
-gcloud iam service-accounts keys create ./yourorg-backup-host-a.json \
+gcloud iam service-accounts keys create ./yourorg-backup-host-a-sa.json \
   --iam-account=yourorg-backup-host-a@your-project-id.iam.gserviceaccount.com \
   --project=your-project-id
 ```
 
 Put the file's contents in your secret store (for example Ansible Vault)
 **without opening it in an editor that wraps long lines**, then delete the
-file.
+file. Until then it is a live credential sitting in your working
+directory: add `*-sa.json` to your repository's `.gitignore` so it can't
+be committed by accident.
 
 ## 4. The encryption keys
 
@@ -112,5 +114,7 @@ owner. Objects written while Unlocked stay Unlocked.
 
 ## Then, on a schedule
 
-Run `scripts/restore-test` regularly (with `--report-url` to alert when
-it fails), and after any change to paths, the dump or the keys.
+Run `scripts/restore-test` regularly (with `--max-age` and
+`--report-url-file` to alert when it fails or backups stop), and after
+any change to paths, the dump or the keys. See
+[`restore.md`](restore.md#proving-it-before-you-need-it).
