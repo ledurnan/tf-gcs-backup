@@ -38,10 +38,17 @@ module "host_a" {
 }
 ```
 
-```bash
-ansible-galaxy collection install \
-  "git+https://github.com/ledurnan/tf-gcs-backup.git#/ansible/,v0.1.0"
+```yaml
+# requirements.yml
+collections:
+  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.1.0/ledurnan-gcs_backup-0.1.0.tar.gz
+    type: url
 ```
+
+Install from the release file, not from git. A git-sourced collection is
+cloned by `ansible-galaxy`, and inside a git hook (an ansible-lint
+pre-commit hook installs `requirements.yml`) that clone inherits
+`GIT_INDEX_FILE` and overwrites the committing repository's index.
 
 Then apply `ledurnan.gcs_backup.offsite_backup` to the host with the
 same tiers. [`docs/using-it.md`](docs/using-it.md) walks through the
