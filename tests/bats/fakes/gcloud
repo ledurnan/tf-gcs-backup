@@ -4,6 +4,7 @@
 #   FAKE_GCS_LOG          every call is appended here
 #   FAKE_BUCKET_JSON      file returned by `storage buckets describe`
 #   FAKE_REMOTE_SIZE      if set, `objects describe` reports this size
+#   FAKE_GCLOUD_ACCOUNTS  file listing the accounts `auth list` reports
 # An object's creation time is its file's modification time.
 set -eu
 echo "gcloud $*" >>"$FAKE_GCS_LOG"
@@ -31,5 +32,8 @@ case "$1 $2 $3" in
   "storage ls "*)
     prefix="${3#gs://}"
     find "$FAKE_GCS_DIR/$prefix" -maxdepth 1 -type f -printf "gs://$prefix%f\n" 2>/dev/null ;;
+  "auth list "*)
+    cat "${FAKE_GCLOUD_ACCOUNTS:-/dev/null}" 2>/dev/null || true ;;
+  "auth activate-service-account "*) ;;
   *) echo "fake gcloud: unhandled: $*" >&2; exit 2 ;;
 esac
