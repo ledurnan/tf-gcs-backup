@@ -18,8 +18,11 @@ Locking is set per tier, with `locked` in the module's `tiers`:
 | `true`            | **Nobody** can delete it or shorten the policy, including the project owner. The period can only be lengthened.                                                                                          | Long tiers, once a restore test has passed                           |
 
 Locking happens when Terraform applies `locked = true`, and can't be
-undone. Afterwards, a plan that sets it back to `false` or shortens
-`retain_days` fails.
+undone. Afterwards, a plan that shortens `retain_days` fails at apply,
+because GCS refuses. A plan that sets `locked` back to `false` asks to
+**replace the bucket**, and the module's `prevent_destroy` stops it before
+anything is sent to Google. Deletion protection on the bucket and the
+lock itself would refuse it too.
 
 A locked tier keeps everything in it for its full retention. That
 includes a mistaken upload and, because the host can still write every

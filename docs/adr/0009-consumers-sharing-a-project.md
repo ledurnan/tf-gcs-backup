@@ -1,6 +1,6 @@
 # 0009: Consumers sharing a project name everything their own
 
-- Status: Proposed
+- Status: Accepted
 
 ## Context
 

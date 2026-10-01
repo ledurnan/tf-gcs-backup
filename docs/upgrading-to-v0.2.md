@@ -10,6 +10,14 @@ loses `storage.objects.setRetention`, which v0.1 hosts use on every
 upload. Between the Terraform apply and the Ansible apply, every v0.1
 host in the project fails its backup, and its run report says so.
 
+## A v0.1 defect this upgrade removes
+
+v0.1's `bootstrap-project` role lacks `storage.buckets.enableObjectRetention`,
+so v0.1's `backup-target` can't create its bucket in a freshly bootstrapped
+project. Existing v0.1 buckets were created some other way and imported.
+v0.2 doesn't use per-object retention and creates its buckets with the
+stock role.
+
 ## What happens to existing backups
 
 Nothing is deleted or moved. The v0.1 bucket stays as it is: every

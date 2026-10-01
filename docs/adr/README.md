@@ -12,6 +12,6 @@ them.
 | [0004](0004-terraform-and-provider-range.md)       | Terraform 1.7+, Google provider 7.x to 8.x; OpenTofu untested                  | Proposed |
 | [0005](0005-distribution.md)                       | Modules by git tag, the role as a collection from the same tag                 | Proposed |
 | [0006](0006-ownership.md)                          | Work projects depend on it like any external project                           | Accepted |
-| [0007](0007-bucket-retention-policy-per-tier.md)   | Retention is a bucket policy, one bucket per tier; the host never chooses it   | Proposed |
-| [0008](0008-emergency-access-to-unlocked-tiers.md) | Optional emergency principal, on unlocked tiers only                           | Proposed |
-| [0009](0009-consumers-sharing-a-project.md)        | Consumers sharing a project name their own roles, buckets and service accounts | Proposed |
+| [0007](0007-bucket-retention-policy-per-tier.md)   | Retention is a bucket policy, one bucket per tier; the host never chooses it   | Accepted |
+| [0008](0008-emergency-access-to-unlocked-tiers.md) | Optional emergency principal, on unlocked tiers only                           | Accepted |
+| [0009](0009-consumers-sharing-a-project.md)        | Consumers sharing a project name their own roles, buckets and service accounts | Accepted |
