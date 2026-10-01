@@ -11,13 +11,14 @@
       - offsite_backup_tiers | length > 0
       - offsite_backup_age_recipients | length > 0
       - offsite_backup_sa_key | length > 0
+      - offsite_backup_max_size | string | length > 0
       - (offsite_backup_paths | length > 0) or (offsite_backup_pre_command | length > 0)
     fail_msg: >-
       offsite_backup_enabled is true but the role is not fully configured.
       Required: offsite_backup_bucket, offsite_backup_retention_mode
       (Locked or Unlocked), offsite_backup_tiers, offsite_backup_age_recipients,
-      offsite_backup_sa_key, and at least one of offsite_backup_paths or
-      offsite_backup_pre_command.
+      offsite_backup_sa_key, offsite_backup_max_size, and at least one of
+      offsite_backup_paths or offsite_backup_pre_command.
     quiet: true
 
 - name: Assert the object prefix is a safe path segment
@@ -71,6 +72,19 @@
     fail_msg: >-
       offsite_backup_lifecycle_slack_days must be a whole number of 0 or
       more, equal to the Terraform module's lifecycle_slack_days.
+    quiet: true
+
+- name: Assert the size guard settings are well formed
+  ansible.builtin.assert:
+    that:
+      - offsite_backup_max_size | string is match('^[1-9][0-9]*[KMGT]?$')
+      - offsite_backup_growth_min_size | string is match('^[0-9]+[KMGT]?$')
+      - offsite_backup_max_growth_percent | string is match('^[0-9]+$')
+    fail_msg: >-
+      offsite_backup_max_size (more than 0) and offsite_backup_growth_min_size
+      must be a whole number of bytes, optionally with K, M, G or T (powers
+      of 1024), such as 2G. offsite_backup_max_growth_percent must be a
+      whole number; 0 turns the growth check off.
     quiet: true
 
 - name: Assert every path is absolute

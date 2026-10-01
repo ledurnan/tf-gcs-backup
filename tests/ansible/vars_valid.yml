@@ -11,6 +11,7 @@ offsite_backup_age_recipients:
   - age1exampleexampleexampleexampleexampleexampleexampleexampleex
 offsite_backup_paths:
   - /etc/example
+offsite_backup_max_size: 1G
 offsite_backup_pre_command: 'echo dump > "$DUMP_DIR/dump.txt"'
 # Shape only: not a real key.
 offsite_backup_sa_key: '{"type": "service_account", "client_email": "writer@example-project.iam.gserviceaccount.com", "private_key": "placeholder"}'

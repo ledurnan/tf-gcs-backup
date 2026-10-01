@@ -57,6 +57,30 @@ offsite_backup_paths: []
 #   mysqldump --all-databases --single-transaction > "$DUMP_DIR/all.sql"
 offsite_backup_pre_command: ""
 
+# --- Size guard -------------------------------------------------------
+
+# Each run's archive is stored once per due tier and, once Locked, can't
+# be removed before it expires. The size guard stops a run before
+# anything is uploaded, so a path added by mistake or data that
+# ballooned costs a failed run (and an alert), not months of storage.
+# It guards against mistakes, not a compromised host. Sizes take K, M,
+# G or T (powers of 1024).
+
+# REQUIRED. The largest encrypted archive this host may upload. Set it
+# from a measured run with headroom (say 3 to 10 times), so choosing it
+# is also a decision about the order of magnitude being backed up.
+offsite_backup_max_size: ""
+
+# Refuse an archive more than this percentage larger than the last
+# successful run's. 100 allows it to double. 0 turns the check off.
+# Expected growth: touch <state dir>/accept-size and run again; the next
+# run skips this check once.
+offsite_backup_max_growth_percent: 100
+
+# Archives at or below this size skip the growth check: doubling from
+# a few megabytes costs nothing.
+offsite_backup_growth_min_size: "64M"
+
 # --- Encryption -------------------------------------------------------
 
 # REQUIRED. One or more age public keys (age1...). The matching private
@@ -73,8 +97,9 @@ offsite_backup_sa_key: ""
 # --- Reporting --------------------------------------------------------
 
 # Optional heartbeat URL. Every run, success or failure, is POSTed as
-# {"status":"ok"} or {"status":"failed","detail":...}. Treat it as a
-# secret: most heartbeat URLs are their own credential.
+# {"status":"ok","bytes":<archive size>} or
+# {"status":"failed","detail":...}. Treat it as a secret: most heartbeat
+# URLs are their own credential.
 offsite_backup_report_url: ""
 
 # --- Schedule and resources -------------------------------------------

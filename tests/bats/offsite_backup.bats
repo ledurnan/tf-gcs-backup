@@ -32,6 +32,9 @@ RETENTION_MODE=Unlocked
 LIFECYCLE_SLACK_DAYS=1
 WORK_DIR=$T/work
 STATE_DIR=$T/state
+MAX_SIZE=1M
+MAX_GROWTH_PERCENT=100
+GROWTH_MIN_SIZE=0
 EOF
   printf '%s\n' "daily 7 always" "weekly 35 weekday:1" "monthly 90 monthday:01" \
     >"$OFFSITE_BACKUP_CONF_DIR/tiers"
@@ -207,6 +210,117 @@ EOF
     OFFSITE_BACKUP_STATE_DIR="$T/state" run "$REPORT"
   [ "$status" -eq 0 ]
   grep -q 'https://heartbeat.example/abc {"status":"ok"}' "$FAKE_CURL_LOG"
+}
+
+@test "report: success carries the archive size the backup recorded" {
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  size="$(cat "$T/state/last-size")"
+  REPORT_URL=https://heartbeat.example/abc SERVICE_RESULT=success \
+    OFFSITE_BACKUP_STATE_DIR="$T/state" run "$REPORT"
+  [ "$status" -eq 0 ]
+  grep -q "{\"status\":\"ok\",\"bytes\":${size}}" "$FAKE_CURL_LOG"
+}
+
+# --- size guard -----------------------------------------------------------
+
+# big_file <bytes>: incompressible data, so the archive grows with it.
+big_file() {
+  head -c "$1" /dev/urandom >"$T/data/app/big.bin"
+}
+
+set_conf() {
+  sed -i "s|^$1=.*|$1=$2|" "$OFFSITE_BACKUP_CONF_DIR/backup.conf"
+}
+
+@test "size guard: an archive over MAX_SIZE uploads nothing and says why" {
+  big_file 2000000
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  grep -q "over MAX_SIZE 1.0MiB" "$T/state/last-error"
+}
+
+@test "size guard: accept-size never lifts MAX_SIZE" {
+  big_file 2000000
+  mkdir -p "$T/state" && touch "$T/state/accept-size"
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  [ -e "$T/state/accept-size" ]
+}
+
+@test "size guard: a successful run records its size" {
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$T/state/last-size")" = "$(stat -c %s "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-03.tar.age")" ]
+}
+
+@test "size guard: growth beyond MAX_GROWTH_PERCENT uploads nothing" {
+  big_file 100000
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  before="$(cat "$T/state/last-size")"
+  big_file 300000
+  OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
+  [ "$status" -ne 0 ]
+  [ ! -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+  grep -q "more than MAX_GROWTH_PERCENT 100%" "$T/state/last-error"
+  grep -q "touch $T/state/accept-size" "$T/state/last-error"
+  # A refused run leaves the baseline alone.
+  [ "$(cat "$T/state/last-size")" = "$before" ]
+}
+
+@test "size guard: growth within MAX_GROWTH_PERCENT uploads" {
+  big_file 100000
+  run_backup "$WEDNESDAY"
+  big_file 150000
+  OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
+  [ "$status" -eq 0 ]
+  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+}
+
+@test "size guard: accept-size skips the growth check once, then is removed" {
+  big_file 100000
+  run_backup "$WEDNESDAY"
+  big_file 300000
+  touch "$T/state/accept-size"
+  OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
+  [ "$status" -eq 0 ]
+  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+  [ ! -e "$T/state/accept-size" ]
+  [ "$(cat "$T/state/last-size")" -gt 300000 ]
+}
+
+@test "size guard: archives at or below GROWTH_MIN_SIZE skip the growth check" {
+  set_conf GROWTH_MIN_SIZE 512K
+  big_file 100000
+  run_backup "$WEDNESDAY"
+  big_file 300000
+  OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
+  [ "$status" -eq 0 ]
+}
+
+@test "size guard: MAX_GROWTH_PERCENT 0 turns the growth check off" {
+  set_conf MAX_GROWTH_PERCENT 0
+  big_file 100000
+  run_backup "$WEDNESDAY"
+  big_file 300000
+  OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
+  [ "$status" -eq 0 ]
+}
+
+@test "size guard: the first run has no baseline and isn't growth-checked" {
+  big_file 300000
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+}
+
+@test "size guard: a malformed MAX_SIZE is refused" {
+  set_conf MAX_SIZE 2GB
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  grep -q "MAX_SIZE '2GB' must be a whole number of bytes" "$T/state/last-error"
 }
 
 @test "report: failure posts the reason the backup script left" {

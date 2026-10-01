@@ -91,6 +91,17 @@ For a database, set `offsite_backup_pre_command` to dump it into
 `$DUMP_DIR`. Never list a live database's files in
 `offsite_backup_paths`: the copy is torn.
 
+Set `offsite_backup_max_size` from a measured archive with headroom.
+Each run's archive is stored once per due tier, so this is also where
+you decide the order of magnitude this host costs to keep. A run over
+the ceiling, or one that grew more than `offsite_backup_max_growth_percent`
+since the last good run, fails before uploading anything and reports
+why. If the growth is expected, `touch /var/lib/offsite-backup/accept-size`
+and run the backup again: the growth check is skipped once.
+
+What can and can't be selected (no excludes, one archive and schedule
+per host) is in [limitations](limitations.md).
+
 ## 6. Prove it
 
 ```bash

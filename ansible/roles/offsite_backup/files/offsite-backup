@@ -11,7 +11,9 @@
 #      a scratch directory
 #   3. tar the configured paths plus that dump, encrypt to the age
 #      recipients (the host holds no private key)
-#   4. upload one object per tier due today, each with a retain-until and
+#   4. refuse an archive that is larger than the configured ceiling, or
+#      that grew too much since the last good run (the size guard)
+#   5. upload one object per tier due today, each with a retain-until and
 #      retention mode, then read each back and compare sizes
 #
 # Usage: offsite-backup [--check-contract]
@@ -19,7 +21,10 @@
 #
 # Configuration, all under $OFFSITE_BACKUP_CONF_DIR (default /etc/offsite-backup):
 #   backup.conf   shell KEY=value lines: BUCKET, PREFIX, RETENTION_MODE,
-#                 LIFECYCLE_SLACK_DAYS, WORK_DIR, STATE_DIR
+#                 LIFECYCLE_SLACK_DAYS, WORK_DIR, STATE_DIR, MAX_SIZE,
+#                 MAX_GROWTH_PERCENT, GROWTH_MIN_SIZE
+#                 (sizes in bytes, or with a K, M, G or T suffix: powers
+#                 of 1024)
 #   tiers         one tier per line: <name> <retain_days> <when> [<name_format>]
 #                   when: always | weekday:<1-7, Monday=1> | monthday:<01-28>
 #                   name_format: date(1) format for the object name
@@ -27,6 +32,13 @@
 #   recipients    age recipients, one per line (age -R format)
 #   pre-backup    optional executable, run with DUMP_DIR set; whatever it
 #                 writes there is archived under offsite-backup-dump/
+#
+# State, under $STATE_DIR:
+#   last-size     the archive size of the last successful run, which the
+#                 growth check compares against
+#   accept-size   if present, the next run skips the growth check once
+#                 (never the ceiling) and removes it on success
+#   last-error    why the last run failed, for offsite-backup-report
 
 set -euo pipefail
 umask 077
@@ -44,6 +56,9 @@ NOW="${OFFSITE_BACKUP_NOW:-$(date -u +%s)}"
 : "${LIFECYCLE_SLACK_DAYS:?LIFECYCLE_SLACK_DAYS is not set in backup.conf}"
 : "${WORK_DIR:?WORK_DIR is not set in backup.conf}"
 : "${STATE_DIR:?STATE_DIR is not set in backup.conf}"
+: "${MAX_SIZE:?MAX_SIZE is not set in backup.conf}"
+: "${MAX_GROWTH_PERCENT:?MAX_GROWTH_PERCENT is not set in backup.conf}"
+: "${GROWTH_MIN_SIZE:?GROWTH_MIN_SIZE is not set in backup.conf}"
 
 export CLOUDSDK_CONFIG="${CLOUDSDK_CONFIG:-$STATE_DIR/gcloud}"
 LAST_ERROR="$STATE_DIR/last-error"
@@ -68,6 +83,17 @@ case "$RETENTION_MODE" in
   Locked | Unlocked) ;;
   *) die "RETENTION_MODE must be Locked or Unlocked, not '$RETENTION_MODE'" ;;
 esac
+
+# Sizes accept a K, M, G or T suffix (powers of 1024).
+to_bytes() {
+  [[ "$2" =~ ^[0-9]+[KMGT]?$ ]] || die "$1 '$2' must be a whole number of bytes, optionally with K, M, G or T"
+  numfmt --from=iec "$2"
+}
+MAX_BYTES="$(to_bytes MAX_SIZE "$MAX_SIZE")"
+GROWTH_MIN_BYTES="$(to_bytes GROWTH_MIN_SIZE "$GROWTH_MIN_SIZE")"
+[[ "$MAX_GROWTH_PERCENT" =~ ^[0-9]+$ ]] \
+  || die "MAX_GROWTH_PERCENT '$MAX_GROWTH_PERCENT' must be a whole number (0 turns the growth check off)"
+[ "$MAX_BYTES" -gt 0 ] || die "MAX_SIZE must be more than 0"
 
 # --- tiers ------------------------------------------------------------
 
@@ -194,7 +220,33 @@ set -e -o pipefail
 LOCAL_SIZE="$(stat -c %s "$WORK/backup.tar.age")"
 [ "$LOCAL_SIZE" -gt 0 ] || die "encrypted archive is empty; nothing uploaded"
 
-# --- 4. upload ------------------------------------------------------------
+# --- 4. size guard --------------------------------------------------------
+
+# Every upload is stored once per due tier and, once Locked, can't be
+# removed before it expires. So a path added by mistake, or data that
+# ballooned, is cheapest to stop here, before anything is written.
+#
+# This guards against mistakes, not attackers: a compromised host can
+# skip this script altogether.
+human() { numfmt --to=iec-i --suffix=B "$1"; }
+
+[ "$LOCAL_SIZE" -le "$MAX_BYTES" ] \
+  || die "archive is $(human "$LOCAL_SIZE"), over MAX_SIZE $(human "$MAX_BYTES"); nothing uploaded. Check what is being backed up, or raise offsite_backup_max_size"
+
+LAST_SIZE_FILE="$STATE_DIR/last-size"
+ACCEPT_SIZE_FILE="$STATE_DIR/accept-size"
+last_size="$(cat "$LAST_SIZE_FILE" 2>/dev/null || true)"
+
+if [ -e "$ACCEPT_SIZE_FILE" ]; then
+  log notice "accept-size is set: skipping the growth check for this run"
+elif [ "$MAX_GROWTH_PERCENT" -gt 0 ] && [[ "$last_size" =~ ^[1-9][0-9]*$ ]] \
+  && [ "$LOCAL_SIZE" -gt "$GROWTH_MIN_BYTES" ]; then
+  limit=$((last_size + last_size * MAX_GROWTH_PERCENT / 100))
+  [ "$LOCAL_SIZE" -le "$limit" ] \
+    || die "archive is $(human "$LOCAL_SIZE"), up from $(human "$last_size") last run: more than MAX_GROWTH_PERCENT ${MAX_GROWTH_PERCENT}%; nothing uploaded. If the growth is expected, touch ${ACCEPT_SIZE_FILE} and run again"
+fi
+
+# --- 5. upload ------------------------------------------------------------
 
 upload() {
   local object="$1" retain_days="$2" until remote_size
@@ -238,3 +290,8 @@ if [ "$uploaded" -eq 0 ]; then
 else
   log info "backup complete: ${uploaded} object(s) stored"
 fi
+
+# The baseline for the next run's growth check, and the size the run
+# report carries. Written only once the run has succeeded.
+printf '%s\n' "$LOCAL_SIZE" >"$LAST_SIZE_FILE"
+rm -f "$ACCEPT_SIZE_FILE"

@@ -19,6 +19,9 @@
           - /etc/letsencrypt
           - /etc/ssh
           - /root
+        # A few MB of config: a ceiling far above that catches a large
+        # directory listed by mistake.
+        offsite_backup_max_size: 100M
         offsite_backup_age_recipients:
           - "{{ backup_age_operator_recipient }}"
           - "{{ backup_age_recovery_recipient }}"

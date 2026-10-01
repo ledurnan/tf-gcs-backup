@@ -26,6 +26,9 @@
         offsite_backup_paths:
           - /srv/app/config
         offsite_backup_timeout: 2h
+        # Measured archive around 1 GB: headroom for growth, not for a
+        # mistake ten times its size.
+        offsite_backup_max_size: 5G
         offsite_backup_age_recipients:
           - "{{ backup_age_operator_recipient }}"
           - "{{ backup_age_recovery_recipient }}"

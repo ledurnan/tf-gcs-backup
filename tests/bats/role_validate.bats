@@ -45,3 +45,11 @@ refused() {
 @test "refused: a key that isn't JSON" { refused '{"offsite_backup_sa_key": "not json"}'; }
 @test "refused: a key of the wrong type" { refused '{"offsite_backup_sa_key": "{\"type\": \"user\", \"client_email\": \"x\", \"private_key\": \"y\"}"}'; }
 @test "refused: a pre-backup command alone is fine, but no recipients is not" { refused '{"offsite_backup_paths": [], "offsite_backup_age_recipients": []}'; }
+@test "refused: no maximum size" { refused '{"offsite_backup_max_size": ""}'; }
+@test "refused: a zero maximum size" { refused '{"offsite_backup_max_size": "0"}'; }
+@test "refused: a maximum size in decimal units" { refused '{"offsite_backup_max_size": "2GB"}'; }
+@test "refused: a fractional growth percentage" { refused '{"offsite_backup_max_growth_percent": "50.5"}'; }
+@test "accepted: a maximum size in plain bytes" {
+  validate -e '{"offsite_backup_max_size": 1073741824}'
+  [ "$status" -eq 0 ]
+}
