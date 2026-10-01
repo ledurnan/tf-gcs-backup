@@ -27,9 +27,11 @@ refused() {
   [ "$status" -eq 0 ]
 }
 
-@test "refused: no bucket" { refused '{"offsite_backup_bucket": ""}'; }
-@test "refused: no retention mode" { refused '{"offsite_backup_retention_mode": ""}'; }
-@test "refused: unknown retention mode" { refused '{"offsite_backup_retention_mode": "Forever"}'; }
+@test "refused: no bucket name prefix" { refused '{"offsite_backup_bucket_name_prefix": ""}'; }
+@test "refused: a bucket name prefix with capitals" { refused '{"offsite_backup_bucket_name_prefix": "Example-Host"}'; }
+@test "refused: a tier bucket name over 63 characters" { refused '{"offsite_backup_bucket_name_prefix": "a-very-long-bucket-name-prefix-that-leaves-no-room-at-all"}'; }
+@test "refused: a v0.1 retention mode" { refused '{"offsite_backup_retention_mode": "Locked"}'; }
+@test "refused: a v0.1 bucket" { refused '{"offsite_backup_bucket": "example-host-backup"}'; }
 @test "refused: no tiers" { refused '{"offsite_backup_tiers": []}'; }
 @test "refused: no recipients" { refused '{"offsite_backup_age_recipients": []}'; }
 @test "refused: a private key as a recipient" { refused '{"offsite_backup_age_recipients": ["AGE-SECRET-KEY-1EXAMPLE"]}'; }
@@ -45,3 +47,11 @@ refused() {
 @test "refused: a key that isn't JSON" { refused '{"offsite_backup_sa_key": "not json"}'; }
 @test "refused: a key of the wrong type" { refused '{"offsite_backup_sa_key": "{\"type\": \"user\", \"client_email\": \"x\", \"private_key\": \"y\"}"}'; }
 @test "refused: a pre-backup command alone is fine, but no recipients is not" { refused '{"offsite_backup_paths": [], "offsite_backup_age_recipients": []}'; }
+@test "refused: no maximum size" { refused '{"offsite_backup_max_size": ""}'; }
+@test "refused: a zero maximum size" { refused '{"offsite_backup_max_size": "0"}'; }
+@test "refused: a maximum size in decimal units" { refused '{"offsite_backup_max_size": "2GB"}'; }
+@test "refused: a fractional growth percentage" { refused '{"offsite_backup_max_growth_percent": "50.5"}'; }
+@test "accepted: a maximum size in plain bytes" {
+  validate -e '{"offsite_backup_max_size": 1073741824}'
+  [ "$status" -eq 0 ]
+}

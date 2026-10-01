@@ -97,6 +97,30 @@ exists() {
   "$@" >/dev/null 2>&1
 }
 
+# A service account created moments ago isn't visible everywhere at once:
+# a binding that names it can fail with "does not exist" for a minute or
+# so. Retry exactly that failure; anything else fails straight away.
+# BOOTSTRAP_RETRY_SECONDS (default 10) and BOOTSTRAP_RETRIES (default 12)
+# set the pace.
+run_retry() {
+  printf '%q ' "$@"
+  echo
+  [ "$apply" -eq 1 ] || return 0
+  local out attempt tries="${BOOTSTRAP_RETRIES:-12}"
+  for ((attempt = 1; attempt <= tries; attempt++)); do
+    if out="$("$@" 2>&1)"; then
+      echo "$out"
+      return 0
+    fi
+    if ! grep -q "does not exist" <<<"$out" || [ "$attempt" -eq "$tries" ]; then
+      echo "$out" >&2
+      return 1
+    fi
+    echo "# the service account isn't visible yet; retrying ($attempt/$tries)"
+    sleep "${BOOTSTRAP_RETRY_SECONDS:-10}"
+  done
+}
+
 [ "$apply" -eq 1 ] || echo "# Dry run: nothing is changed. Re-run with --apply to execute."
 
 step "APIs"
@@ -126,7 +150,7 @@ else
 fi
 
 step "Grant the role to the service account on the project"
-run "${g[@]}" projects add-iam-policy-binding "$project" \
+run_retry "${g[@]}" projects add-iam-policy-binding "$project" \
   --member="serviceAccount:$sa_email" \
   --role="projects/$project/roles/$role_id" --condition=None
 
@@ -156,12 +180,12 @@ run "${g[@]}" storage buckets update "gs://$state_bucket" --project="$project" \
   --versioning --uniform-bucket-level-access --public-access-prevention
 
 step "Let the service account read and write state, in the state bucket only"
-run "${g[@]}" storage buckets add-iam-policy-binding "gs://$state_bucket" \
+run_retry "${g[@]}" storage buckets add-iam-policy-binding "gs://$state_bucket" \
   --project="$project" \
   --member="serviceAccount:$sa_email" --role=roles/storage.objectAdmin
 
 step "Let $account impersonate the service account"
-run "${g[@]}" iam service-accounts add-iam-policy-binding "$sa_email" \
+run_retry "${g[@]}" iam service-accounts add-iam-policy-binding "$sa_email" \
   --project="$project" \
   --member="user:$account" --role=roles/iam.serviceAccountTokenCreator
 

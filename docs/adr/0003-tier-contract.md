@@ -1,6 +1,9 @@
 # 0003: The host checks the bucket's expiry rules before every run
 
-- Status: Proposed
+- Status: Proposed. Amended by [0007](0007-bucket-retention-policy-per-tier.md):
+  each tier is its own bucket, and the check covers its retention policy
+  as well as its expiry rule. The decision to check on the host is
+  unchanged.
 
 ## Context
 
@@ -31,6 +34,12 @@ run, refusing to upload unless each of its tiers has a Delete rule for
 `<tier>/` at exactly `retain_days + slack`. The role runs the same check
 (`offsite-backup --check-contract`) when it's applied. The module also
 outputs `tiers` so the values can be copied rather than retyped.
+
+Since [0007](0007-bucket-retention-policy-per-tier.md), the check reads
+each tier's bucket (`<bucket_name_prefix>-<tier>`) and requires a
+retention policy of exactly `retain_days` and a Delete rule with no
+prefix at exactly `retain_days + slack`. It reports every tier that
+disagrees, not just the first, and logs whether each tier is locked.
 
 ## Consequences
 

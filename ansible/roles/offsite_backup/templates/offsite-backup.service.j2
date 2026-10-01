@@ -1,6 +1,6 @@
 # {{ ansible_managed }}
 [Unit]
-Description=Encrypted off-site backup to gs://{{ offsite_backup_bucket }}
+Description=Encrypted off-site backup to gs://{{ offsite_backup_bucket_name_prefix }}-<tier>
 After=network-online.target
 Wants=network-online.target
 

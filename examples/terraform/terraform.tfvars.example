@@ -1,3 +1,4 @@
 project     = "your-project-id"
 location    = "europe-west2"
-name_prefix = "yourorg-backup"
+name_prefix    = "yourorg-backup"
+role_id_prefix = "yourorgBackup"

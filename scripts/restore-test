@@ -9,10 +9,15 @@
 # schedule.
 #
 # Usage:
-#   restore-test --bucket <bucket> --prefix <host prefix> --tier <tier>
-#                --identity <age identity file>
+#   restore-test --bucket-prefix <bucket name prefix> --tier <tier>
+#                --prefix <host prefix> --identity <age identity file>
 #                [--expect <entry>]... [--max-age <hours>]
 #                [--report-url-file <file>]
+#
+#   --bucket-prefix    the backup-target module's bucket_name_prefix: reads
+#                      gs://<bucket-prefix>-<tier>/<prefix>/
+#   --bucket           instead of --bucket-prefix, a v0.1 bucket holding
+#                      every tier: reads gs://<bucket>/<tier>/<prefix>/
 #
 #   --expect           a path that must appear in the archive, matched as
 #                      a substring of an entry (e.g. etc/letsencrypt/ or
@@ -34,12 +39,13 @@
 
 set -euo pipefail
 
-bucket="" prefix="" tier="" identity="" max_age=""
+bucket_prefix="" bucket="" prefix="" tier="" identity="" max_age=""
 report_url="${RESTORE_TEST_REPORT_URL:-}"
 expect=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --bucket-prefix) bucket_prefix="$2"; shift 2 ;;
     --bucket) bucket="$2"; shift 2 ;;
     --prefix) prefix="$2"; shift 2 ;;
     --tier) tier="$2"; shift 2 ;;
@@ -51,14 +57,22 @@ while [ $# -gt 0 ]; do
       echo "--report-url is gone: an argument is readable by other users of this machine." >&2
       echo "Use --report-url-file <file> or RESTORE_TEST_REPORT_URL instead." >&2
       exit 2 ;;
-    -h | --help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-for v in bucket prefix tier identity; do
+for v in prefix tier identity; do
   [ -n "${!v}" ] || { echo "--$v is required" >&2; exit 2; }
 done
+if [ -n "$bucket_prefix" ] && [ -z "$bucket" ]; then
+  location="gs://${bucket_prefix}-${tier}/${prefix}/"
+elif [ -n "$bucket" ] && [ -z "$bucket_prefix" ]; then
+  location="gs://${bucket}/${tier}/${prefix}/"
+else
+  echo "give exactly one of --bucket-prefix or --bucket" >&2
+  exit 2
+fi
 [[ -z "$max_age" || "$max_age" =~ ^[1-9][0-9]*$ ]] \
   || { echo "--max-age must be a whole number of hours" >&2; exit 2; }
 
@@ -81,7 +95,7 @@ print(json.dumps(b, separators=(",", ":")))' "$@")"
 
 fail() {
   echo "FAIL: $1"
-  report failed "Restore test failed for gs://${bucket}/${tier}/${prefix}/: $1"
+  report failed "Restore test failed for ${location}: $1"
   exit 1
 }
 
@@ -92,14 +106,14 @@ trap 'rm -rf "$work"' EXIT
 # say which backup is newest: the creation time does, and the server sets
 # it. Each line is "<size>  <creation time, UTC>  <url>". Anything that
 # isn't a backup object (<stamp>.tar.age) is never the one tested.
-listing="$(gcloud storage ls -l "gs://${bucket}/${tier}/${prefix}/" 2>/dev/null || true)"
+listing="$(gcloud storage ls -l "$location" 2>/dev/null || true)"
 objects="$(awk '$1 ~ /^[0-9]+$/ && $3 ~ /^gs:\/\// && NF == 3 { print $2, $3 }' <<<"$listing")"
-[ -n "$objects" ] || fail "no objects under gs://${bucket}/${tier}/${prefix}/"
+[ -n "$objects" ] || fail "no objects under ${location}"
 backups="$(grep -E '\.tar\.age$' <<<"$objects" || true)"
 strays="$(grep -cvE '\.tar\.age$' <<<"$objects" || true)"
 [ "$strays" -eq 0 ] \
-  || echo "warning: ignoring $strays object(s) under gs://${bucket}/${tier}/${prefix}/ that are not <stamp>.tar.age" >&2
-[ -n "$backups" ] || fail "no backup objects (<stamp>.tar.age) under gs://${bucket}/${tier}/${prefix}/"
+  || echo "warning: ignoring $strays object(s) under ${location} that are not <stamp>.tar.age" >&2
+[ -n "$backups" ] || fail "no backup objects (<stamp>.tar.age) under ${location}"
 read -r created newest <<<"$(sort <<<"$backups" | tail -n 1)"
 echo "newest: $newest (created $created)"
 
