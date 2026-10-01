@@ -12,10 +12,10 @@ before every run that its tiers match the buckets
 
 Locking is set per tier, with `locked` in the module's `tiers`:
 
-| `locked`          | Before an object is `retain_days` old                                                                                               | Use for                                                              |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `false` (default) | Nobody can delete it. An operator with `storage.buckets.update` can shorten or remove the bucket's policy, and then delete objects. | First rollout, testing, and short tiers you want to be able to clear |
-| `true`            | **Nobody** can delete it or shorten the policy, including the project owner. The period can only be lengthened.                     | Long tiers, once a restore test has passed                           |
+| `locked`          | Before an object is `retain_days` old                                                                                                                                                                    | Use for                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `false` (default) | Nobody can delete it. An operator with `storage.buckets.update` (an emergency member, or the owner) can shorten or remove the bucket's policy, and then delete objects ([`emergency.md`](emergency.md)). | First rollout, testing, and short tiers you want to be able to clear |
+| `true`            | **Nobody** can delete it or shorten the policy, including the project owner. The period can only be lengthened.                                                                                          | Long tiers, once a restore test has passed                           |
 
 Locking happens when Terraform applies `locked = true`, and can't be
 undone. Afterwards, a plan that sets it back to `false` or shortens

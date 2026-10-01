@@ -221,3 +221,95 @@ run "rejects_a_bare_role_id" {
 
   expect_failures = [var.role_name]
 }
+
+run "no_emergency_access_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(google_storage_bucket_iam_member.emergency) == 0
+    error_message = "Nobody gets emergency access unless named."
+  }
+}
+
+run "emergency_access_on_unlocked_tiers_only" {
+  command = plan
+
+  variables {
+    emergency_role_name = "projects/example-project/roles/offsiteBackupEmergency"
+    emergency_members   = { operator = "user:operator@example.com", oncall = "group:backup-oncall@example.com" }
+    tiers = [
+      { name = "daily", retain_days = 7 },
+      { name = "weekly", retain_days = 35 },
+      { name = "monthly", retain_days = 365, locked = true },
+    ]
+  }
+
+  assert {
+    condition     = toset(keys(google_storage_bucket_iam_member.emergency)) == toset(["daily/operator", "daily/oncall", "weekly/operator", "weekly/oncall"])
+    error_message = "Each member must be bound on every unlocked tier and never on a locked one."
+  }
+
+  assert {
+    condition     = alltrue([for b in google_storage_bucket_iam_member.emergency : b.role == "projects/example-project/roles/offsiteBackupEmergency"])
+    error_message = "Emergency bindings must use the emergency role."
+  }
+
+  assert {
+    condition     = google_storage_bucket_iam_member.emergency["weekly/operator"].bucket == "example-host-backup-weekly" && google_storage_bucket_iam_member.emergency["weekly/operator"].member == "user:operator@example.com"
+    error_message = "Each binding must be on its tier's bucket."
+  }
+}
+
+run "emergency_members_need_the_role" {
+  command = plan
+
+  variables {
+    emergency_members = { operator = "user:operator@example.com" }
+  }
+
+  expect_failures = [google_service_account.writer]
+}
+
+run "the_writer_is_never_an_emergency_member" {
+  command = plan
+
+  variables {
+    emergency_role_name = "projects/example-project/roles/offsiteBackupEmergency"
+    emergency_members   = { host = "serviceAccount:example-host-backup@example-project.iam.gserviceaccount.com" }
+  }
+
+  expect_failures = [google_service_account.writer]
+}
+
+run "rejects_public_emergency_members" {
+  command = plan
+
+  variables {
+    emergency_role_name = "projects/example-project/roles/offsiteBackupEmergency"
+    emergency_members   = { everyone = "allUsers" }
+  }
+
+  expect_failures = [var.emergency_members]
+}
+
+run "rejects_a_whole_domain_as_emergency_member" {
+  command = plan
+
+  variables {
+    emergency_role_name = "projects/example-project/roles/offsiteBackupEmergency"
+    emergency_members   = { company = "domain:example.com" }
+  }
+
+  expect_failures = [var.emergency_members]
+}
+
+run "rejects_a_bad_emergency_member_name" {
+  command = plan
+
+  variables {
+    emergency_role_name = "projects/example-project/roles/offsiteBackupEmergency"
+    emergency_members   = { "On Call" = "group:backup-oncall@example.com" }
+  }
+
+  expect_failures = [var.emergency_members]
+}

@@ -54,7 +54,11 @@ Check that `<prefix>-<longest tier name>` fits in 63 characters.
 And once per project:
 
 - the writer role (`module.writer_role`) **updated in place**, losing
-  `storage.objects.setRetention`.
+  `storage.objects.setRetention`;
+- the emergency role and a `time_sleep` **created**
+  ([ADR 0008](adr/0008-emergency-access-to-unlocked-tiers.md)). The apply
+  pauses for a minute after creating the role. `terraform init -upgrade`
+  first, to fetch the `hashicorp/time` provider.
 
 **Stop if the plan destroys a bucket or the service account.** Apply.
 

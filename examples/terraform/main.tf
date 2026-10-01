@@ -61,4 +61,9 @@ module "database_host" {
   ]
   # 28 + 1 day of slack keeps every object inside the 35-day promise.
   lifecycle_slack_days = 1
+
+  # Optional: an identity that can clear these unlocked tiers in an
+  # emergency (ADR 0008). Kept for this alone, never on a host.
+  # emergency_role_name = module.writer_role.emergency_role_name
+  # emergency_members   = { oncall = "group:backup-emergency@yourorg.example" }
 }

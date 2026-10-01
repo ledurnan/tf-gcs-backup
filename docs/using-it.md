@@ -19,7 +19,12 @@ module "writer_role" {
 }
 ```
 
-The role grants `storage.objects.create`, `get` and `list`, and
+It also creates an emergency role for clearing an unlocked tier
+([ADR 0008](adr/0008-emergency-access-to-unlocked-tiers.md)), unused
+until step 2 names someone. The first apply waits a minute after
+creating the roles, until Google accepts bindings to them.
+
+The writer role grants `storage.objects.create`, `get` and `list`, and
 `storage.buckets.get`. It **never** grants a permission to delete,
 change objects or buckets, set retention, or change access. Every host's
 service account is bound to it, on that host's buckets only.
@@ -47,6 +52,17 @@ One bucket per tier for each host: here `yourorg-backup-host-a-daily` and
 retention policy and expiry rule come from its tier. Choose tiers with
 [`retention.md`](retention.md), and leave them unlocked for now.
 `terraform apply`.
+
+Optionally, give an identity emergency access to the host's unlocked
+tiers, to clear junk without the project owner's account
+([`emergency.md`](emergency.md)):
+
+```hcl
+  emergency_role_name = module.writer_role.emergency_role_name
+  emergency_members   = { oncall = "group:backup-emergency@yourorg.example" }
+```
+
+Use an identity kept for this alone, never on a backed-up host.
 
 Terraform can't delete the buckets: they have `prevent_destroy` and a
 `PREVENT` deletion policy, because they will hold objects nobody can

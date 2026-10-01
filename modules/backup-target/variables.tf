@@ -128,3 +128,38 @@ variable "soft_delete_retention_seconds" {
   type        = number
   default     = null
 }
+
+variable "emergency_role_name" {
+  description = "Full name of the emergency custom role, from the project-role module's emergency_role_name output. Needed only with emergency_members."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.emergency_role_name == null || can(regex("^projects/[^/]+/roles/[^/]+$", var.emergency_role_name))
+    error_message = "emergency_role_name must be a full custom role name, projects/<project>/roles/<role_id>."
+  }
+}
+
+variable "emergency_members" {
+  description = <<-EOT
+    Principals given emergency access to this host's unlocked tiers
+    (ADR 0008), by a name you choose: { oncall = "group:..." }. They can
+    remove or shorten a tier's retention policy and then delete objects,
+    for example to clear junk a compromised host wrote. Locked tiers are
+    never included. Use an identity that is never on a backed-up host and
+    isn't anyone's everyday account. Empty by default: the project owner
+    can do the same in an emergency.
+  EOT
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.emergency_members) : can(regex("^[a-z0-9][a-z0-9_-]{0,30}$", k))])
+    error_message = "Each emergency member's name must be lowercase letters, digits, hyphens and underscores (1-31 characters)."
+  }
+
+  validation {
+    condition     = alltrue([for m in values(var.emergency_members) : can(regex("^(user|group|serviceAccount):[^@\\s]+@[^@\\s]+$", m))])
+    error_message = "Each emergency member must be user:, group: or serviceAccount: followed by an email address. Never allUsers, allAuthenticatedUsers or a whole domain."
+  }
+}

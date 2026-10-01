@@ -27,6 +27,12 @@ variable "role_id" {
   default     = "tfgcsbValidationWriter"
 }
 
+variable "emergency_role_id" {
+  description = "Custom role ID for the validation's emergency role."
+  type        = string
+  default     = "tfgcsbValidationEmergency"
+}
+
 variable "labels" {
   description = "Labels on every bucket, so validation buckets are easy to find."
   type        = map(string)

@@ -26,6 +26,17 @@ locals {
       bucket             = "${var.bucket_name_prefix}-${t.name}"
     }
   }
+
+  writer_member = "serviceAccount:${var.service_account_id}@${var.project}.iam.gserviceaccount.com"
+
+  # Emergency access (ADR 0008) on unlocked tiers only: nobody can clear a
+  # locked tier, so a binding there would only widen access for nothing.
+  # Keyed by tier and the member's name, never its value, so the keys are
+  # known at plan time even when the member is created in the same apply.
+  emergency_bindings = {
+    for pair in setproduct(sort([for k, t in local.tiers : k if !t.locked]), sort(keys(var.emergency_members))) :
+    "${pair[0]}/${pair[1]}" => { tier = pair[0], member = var.emergency_members[pair[1]] }
+  }
 }
 
 resource "google_storage_bucket" "tier" {
@@ -94,7 +105,20 @@ resource "google_storage_bucket" "tier" {
 }
 
 resource "google_service_account" "writer" {
-  project      = var.project
+  project = var.project
+
+  lifecycle {
+    precondition {
+      condition     = length(var.emergency_members) == 0 || var.emergency_role_name != null
+      error_message = "emergency_members needs emergency_role_name: the project-role module's emergency_role_name output."
+    }
+
+    precondition {
+      condition     = !contains(values(var.emergency_members), local.writer_member)
+      error_message = "The host's own writer can't be an emergency member: a compromised host could then clear its own backups."
+    }
+  }
+
   account_id   = var.service_account_id
   display_name = coalesce(var.service_account_display_name, "Off-site backup writer for ${var.bucket_name_prefix}")
   description  = "Writes encrypted backups to gs://${var.bucket_name_prefix}-<tier>. Cannot delete or set retention."
@@ -108,6 +132,19 @@ resource "google_storage_bucket_iam_member" "writer" {
   bucket = each.value.name
   role   = var.role_name
   member = "serviceAccount:${google_service_account.writer.email}"
+}
+
+# Emergency members can remove an unlocked tier's retention policy and
+# then delete objects in it. Keep them off every backed-up host.
+resource "google_storage_bucket_iam_member" "emergency" {
+  for_each = local.emergency_bindings
+
+  bucket = google_storage_bucket.tier[each.value.tier].name
+  # Never applied with the placeholder: the writer's precondition stops
+  # the plan when emergency_role_name is missing. It only keeps the
+  # provider from failing first, with a less helpful message.
+  role   = coalesce(var.emergency_role_name, "projects/-/roles/emergency-role-name-not-set")
+  member = each.value.member
 }
 
 # v0.1 kept every tier in one bucket with per-object retention. Upgrading

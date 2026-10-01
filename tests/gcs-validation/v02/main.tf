@@ -26,6 +26,16 @@ module "writer_role" {
   project = var.project
   role_id = var.role_id
   title   = "tf-gcs-backup validation writer (disposable)"
+
+  emergency_role_id = var.emergency_role_id
+  emergency_title   = "tf-gcs-backup validation emergency (disposable)"
+}
+
+# Stands in for an operator's break-glass identity (ADR 0008).
+resource "google_service_account" "emergency" {
+  project      = var.project
+  account_id   = "${var.sa_prefix}-emg"
+  display_name = "tf-gcs-backup validation emergency (disposable)"
 }
 
 module "upgraded" {
@@ -51,12 +61,16 @@ module "validation" {
     { name = "daily", retain_days = 1 },
     { name = "locked", retain_days = 1, locked = var.lock_locked_tier },
   ]
+
+  emergency_role_name = module.writer_role.emergency_role_name
+  emergency_members   = { validation = "serviceAccount:${google_service_account.emergency.email}" }
 }
 
 output "validation" {
   value = {
     buckets               = module.validation.buckets
     service_account_email = module.validation.service_account_email
+    emergency_bindings    = module.validation.emergency_bindings
   }
 }
 

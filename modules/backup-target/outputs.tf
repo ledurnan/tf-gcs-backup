@@ -27,3 +27,8 @@ output "key_issue_command" {
   description = "The one-off command that issues the host's key. Run it deliberately, put the key in your secret store, then delete the file."
   value       = "gcloud iam service-accounts keys create ./${var.service_account_id}.json --iam-account=${google_service_account.writer.email} --project=${var.project}"
 }
+
+output "emergency_bindings" {
+  description = "Who has emergency access to which tier. Locked tiers never appear."
+  value       = { for k, b in local.emergency_bindings : k => b }
+}

@@ -13,6 +13,8 @@
 #   writer                  what the writer must not be able to do
 #   locked                  the locked tier, as the operator
 #   unlocked                the unlocked tier, as the operator
+#   emergency               the emergency principal (ADR 0008): can clear
+#                           the unlocked tier, nothing else
 #   liens                   list the project's liens
 #   cleanup                 delete everything the validation created
 #
@@ -44,6 +46,7 @@ ACCOUNT="$(sed -n 's/^ACCOUNT=//p' "$HERE/.tf-identity")"
 SA_PREFIX="tfgcsb"
 VAL_WRITER="${SA_PREFIX}-val@${PROJECT}.iam.gserviceaccount.com"
 UPG_WRITER="${SA_PREFIX}-upg@${PROJECT}.iam.gserviceaccount.com"
+EMERGENCY="${SA_PREFIX}-emg@${PROJECT}.iam.gserviceaccount.com"
 DAILY="${P}-val-daily"
 LOCKED="${P}-val-locked"
 OLD="${P}-upg"
@@ -87,6 +90,25 @@ run_check() {
     else
       record UNEXPECTED "$desc (failed, but not as a refusal; see log)"; FAILED=1
     fi
+  fi
+}
+
+# run_retained <description> <command...>: GCS must refuse it *because of
+# retention*, not for some other reason such as a missing permission.
+run_retained() {
+  local desc="$1" out rc
+  shift
+  { echo; echo "### $desc"; echo "\$ $*"; } >>"$LOG"
+  out="$("$@" 2>&1)"
+  rc=$?
+  echo "$out" >>"$LOG"
+  echo "rc=$rc" >>"$LOG"
+  if [ "$rc" -eq 0 ]; then
+    record FAIL "$desc (it was allowed)"; FAILED=1
+  elif grep -qi "subject to bucket's retention policy" <<<"$out"; then
+    record PASS "$desc (refused: retention)"
+  else
+    record UNEXPECTED "$desc (refused, but not for retention; see log)"; FAILED=1
   fi
 }
 
@@ -142,7 +164,7 @@ PY
   ;;
 
 grant)
-  for sa in "$VAL_WRITER" "$UPG_WRITER"; do
+  for sa in "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY"; do
     run_check ok "let $ACCOUNT impersonate $sa" \
       op iam service-accounts add-iam-policy-binding "$sa" --project="$PROJECT" \
       --member="user:$ACCOUNT" --role=roles/iam.serviceAccountTokenCreator --condition=None
@@ -233,7 +255,7 @@ locked)
   [ -n "$obj" ] || { echo "no object in gs://$LOCKED/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
   run_check ok "the locked tier reports a locked policy" \
     bash -c "gcloud --account='$ACCOUNT' storage buckets describe 'gs://$LOCKED' --format=json | python3 -c 'import json,sys; b=json.load(sys.stdin); p=b.get(\"retention_policy\") or b.get(\"retentionPolicy\") or {}; sys.exit(0 if p.get(\"isLocked\", p.get(\"is_locked\")) in (True,\"true\",\"True\") else 1)'"
-  run_check denied "operator can't delete an object in the locked tier" op storage rm "$obj"
+  run_retained "operator can't delete an object in the locked tier" op storage rm "$obj"
   run_check denied "operator can't remove the locked policy" op storage buckets update "gs://$LOCKED" --clear-retention-period
   run_check denied "operator can't shorten the locked policy" op storage buckets update "gs://$LOCKED" --retention-period=1s
   finish
@@ -242,9 +264,35 @@ locked)
 unlocked)
   obj="$(newest_object "$DAILY")"
   [ -n "$obj" ] || { echo "no object in gs://$DAILY/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
-  run_check denied "operator can't delete a retained object while the policy stands" op storage rm "$obj"
+  run_retained "operator can't delete a retained object while the policy stands" op storage rm "$obj"
   run_check ok "operator CAN remove the unlocked policy" op storage buckets update "gs://$DAILY" --clear-retention-period
   run_check ok "...and then delete the object" op storage rm "$obj"
+  echo "note: gs://$DAILY now has no retention policy; 'tf-with-identity apply' in v02 restores it" | tee -a "$LOG"
+  finish
+  ;;
+
+emergency)
+  # A fresh object in the unlocked tier, written by the host's writer, so
+  # it is inside its retention whatever ran before.
+  echo "junk $(date -u +%FT%TZ)" >"$SCRATCH/junk.txt"
+  junk="gs://$DAILY/junk/$(date -u +%Y%m%dT%H%M%S).txt"
+  run_check ok "writer uploads an object to the unlocked tier" as_writer "$VAL_WRITER" storage cp "$SCRATCH/junk.txt" "$junk"
+  locked_obj="$(newest_object "$LOCKED")"
+  # shellcheck disable=SC2317  # called through run_check
+  E() { as_writer "$EMERGENCY" "$@"; }
+
+  run_check ok "emergency can list the unlocked tier" E storage ls "gs://$DAILY/"
+  run_retained "emergency can't delete while the policy stands" E storage rm "$junk"
+  run_check denied "emergency can't add objects" E storage cp "$SCRATCH/junk.txt" "gs://$DAILY/junk/emergency.txt"
+  run_check denied "emergency can't read the bucket's IAM policy" E storage buckets get-iam-policy "gs://$DAILY"
+  run_check denied "emergency can't grant itself anything" \
+    E storage buckets add-iam-policy-binding "gs://$DAILY" --member="serviceAccount:$EMERGENCY" --role=roles/storage.admin
+  run_check denied "emergency has no access to the locked tier" E storage ls "gs://$LOCKED/"
+  if [ -n "$locked_obj" ]; then
+    run_check denied "emergency can't delete from the locked tier (no access at all)" E storage rm "$locked_obj"
+  fi
+  run_check ok "emergency CAN remove the unlocked tier's policy" E storage buckets update "gs://$DAILY" --clear-retention-period
+  run_check ok "...and then delete the object" E storage rm "$junk"
   echo "note: gs://$DAILY now has no retention policy; 'tf-with-identity apply' in v02 restores it" | tee -a "$LOG"
   finish
   ;;
@@ -259,7 +307,8 @@ cleanup)
   echo "Deletes the validation's buckets, service accounts and role in $PROJECT:"
   buckets=("$DAILY" "$LOCKED" "${P}-upg-daily" "$OLD")
   printf '  gs://%s\n' "${buckets[@]}"
-  printf '  %s\n' "$VAL_WRITER" "$UPG_WRITER" "projects/$PROJECT/roles/tfgcsbValidationWriter"
+  printf '  %s\n' "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY" \
+    "projects/$PROJECT/roles/tfgcsbValidationWriter" "projects/$PROJECT/roles/tfgcsbValidationEmergency"
   read -r -p "Type the project ID to continue: " answer
   [ "$answer" = "$PROJECT" ] || { echo "aborted"; exit 1; }
   for b in "${buckets[@]}"; do
@@ -271,10 +320,12 @@ cleanup)
     run_check ok "empty gs://$b" bash -c "gcloud --account='$ACCOUNT' storage rm -r 'gs://$b/**' 2>&1 | grep -v 'One or more URLs matched no objects' || true"
     run_check ok "delete gs://$b" op storage buckets delete "gs://$b"
   done
-  for sa in "$VAL_WRITER" "$UPG_WRITER"; do
+  for sa in "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY"; do
     run_check ok "delete $sa" op iam service-accounts delete "$sa" --project="$PROJECT" --quiet
   done
-  run_check ok "delete the validation role" op iam roles delete tfgcsbValidationWriter --project="$PROJECT" --quiet
+  for role in tfgcsbValidationWriter tfgcsbValidationEmergency; do
+    run_check ok "delete the $role role" op iam roles delete "$role" --project="$PROJECT" --quiet
+  done
   echo "Then remove the local state: rm -rf $HERE/.state" | tee -a "$LOG"
   finish
   ;;
