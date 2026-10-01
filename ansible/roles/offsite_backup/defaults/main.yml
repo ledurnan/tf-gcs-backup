@@ -1,7 +1,9 @@
 ---
-# Sending side of the tf-gcs-backup pattern. The receiving side (bucket,
-# expiry rules, write-only role, service account) is the Terraform in
-# modules/; this role only runs on the backed-up host.
+# Sending side of the tf-gcs-backup pattern. The receiving side (a
+# bucket per tier with its retention and expiry, the write-only role,
+# the service account) is the Terraform in modules/; this role only runs
+# on the backed-up host. How long anything is kept is decided there,
+# never here (ADR 0007).
 #
 # Everything consumer-specific is an input. Nothing here is a working
 # configuration on its own: the role refuses to enable until the
@@ -12,37 +14,33 @@ offsite_backup_enabled: false
 
 # --- Where ------------------------------------------------------------
 
-# REQUIRED. The bucket, from the backup-target module's bucket_name output.
-offsite_backup_bucket: ""
+# REQUIRED. From the backup-target module's bucket_name_prefix output.
+# Each tier's bucket is <prefix>-<tier name>.
+offsite_backup_bucket_name_prefix: ""
 
-# Folder name for this host inside each tier: objects are written to
-# <tier>/<prefix>/<date>.tar.age.
+# Folder name for this host inside each tier's bucket: objects are
+# written to gs://<bucket name prefix>-<tier>/<prefix>/<date>.tar.age.
 offsite_backup_prefix: "{{ inventory_hostname }}"
 
 # --- Retention (the tier contract) ------------------------------------
 
 # REQUIRED. Must list the same tiers, with the same retain_days, as the
-# backup-target module's `tiers` input. The script checks this against
-# the bucket before every run and refuses to upload if they differ.
+# backup-target module's `tiers` input. The script checks each tier's
+# bucket before every run and refuses to upload if they differ.
 #
 # Each tier:
-#   name         matches the Terraform tier name (the object prefix)
-#   retain_days  whole number of days each object is locked for
+#   name         matches the Terraform tier name (ends its bucket name)
+#   retain_days  whole number of days the tier's bucket keeps objects
 #   when         always | weekday:<1-7, Monday=1> | monthday:<01-28>
 #   name_format  optional date(1) format for the object name. Defaults:
 #                always %Y-%m-%d, weekday %G-W%V, monthday %Y-%m
 #
 # Retention is a data-protection decision: choose it for the data this
-# host holds. Locked retention cannot be shortened once written.
+# host holds. Whether a tier is locked is set in Terraform, not here.
 offsite_backup_tiers: []
 
 # Must equal the module's lifecycle_slack_days.
 offsite_backup_lifecycle_slack_days: 1
-
-# REQUIRED. Locked (production: nobody can delete or shorten an object
-# before its retain-until, including the project owner) or Unlocked
-# (testing and first rollout: an operator can remove a mistake).
-offsite_backup_retention_mode: ""
 
 # --- What -------------------------------------------------------------
 
@@ -59,8 +57,8 @@ offsite_backup_pre_command: ""
 
 # --- Size guard -------------------------------------------------------
 
-# Each run's archive is stored once per due tier and, once Locked, can't
-# be removed before it expires. The size guard stops a run before
+# Each run's archive is stored once per due tier and, in a locked tier,
+# can't be removed before it expires. The size guard stops a run before
 # anything is uploaded, so a path added by mistake or data that
 # ballooned costs a failed run (and an alert), not months of storage.
 # It guards against mistakes, not a compromised host. Sizes take K, M,

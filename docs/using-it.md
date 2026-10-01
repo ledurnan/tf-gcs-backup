@@ -14,24 +14,24 @@ application-default credentials.
 
 ```hcl
 module "writer_role" {
-  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.1.0"
+  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
   project = "your-project-id"
 }
 ```
 
-The role grants `storage.objects.create`, `get`, `list`,
-`setRetention` and `storage.buckets.get`, and **never** a delete
-permission. Every host's service account is bound to it, on that host's
-bucket only.
+The role grants `storage.objects.create`, `get` and `list`, and
+`storage.buckets.get`. It **never** grants a permission to delete,
+change objects or buckets, set retention, or change access. Every host's
+service account is bound to it, on that host's buckets only.
 
 ## 2. The host's bucket and identity
 
 ```hcl
 module "host_a" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.1.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.2.0"
   project            = "your-project-id"
   location           = "europe-west2"
-  bucket_name        = "yourorg-backup-host-a"
+  bucket_name_prefix = "yourorg-backup-host-a"
   service_account_id = "yourorg-backup-host-a"
   role_name          = module.writer_role.role_name
   tiers = [
@@ -41,11 +41,15 @@ module "host_a" {
 }
 ```
 
-One bucket per host ([ADR 0001](adr/0001-one-bucket-per-host.md)). Choose
-tiers with [`retention.md`](retention.md). `terraform apply`.
+One bucket per tier for each host: here `yourorg-backup-host-a-daily` and
+`yourorg-backup-host-a-weekly` ([ADR 0001](adr/0001-one-bucket-per-host.md),
+[ADR 0007](adr/0007-bucket-retention-policy-per-tier.md)). Each bucket's
+retention policy and expiry rule come from its tier. Choose tiers with
+[`retention.md`](retention.md), and leave them unlocked for now.
+`terraform apply`.
 
-The bucket can't be deleted by Terraform: it has `prevent_destroy` and a
-`PREVENT` deletion policy, because it will hold objects nobody can
+Terraform can't delete the buckets: they have `prevent_destroy` and a
+`PREVENT` deletion policy, because they will hold objects nobody can
 delete.
 
 ## 3. Issue the host's key, out of band
@@ -77,15 +81,16 @@ either can read every backup; losing both loses every backup.
 
 ## 5. The sending side
 
-Apply `ledurnan.gcs_backup.offsite_backup` to the host with the **same
-tiers** (names and `retain_days`) and `lifecycle_slack_days`, a schedule
-for each, and **`offsite_backup_retention_mode: Unlocked`** for now. See
+Apply `ledurnan.gcs_backup.offsite_backup` to the host with
+`offsite_backup_bucket_name_prefix` from the module's output, the **same
+tiers** (names and `retain_days`) and `lifecycle_slack_days`, and a
+schedule for each tier. See
 [`examples/ansible/`](../examples/ansible/) and
 `ansible/roles/offsite_backup/defaults/main.yml` for every variable.
 
 The role refuses to enable with anything required missing. When it
-finishes it has already proved the key reaches the bucket and that the
-tier contract holds ([ADR 0003](adr/0003-tier-contract.md)).
+finishes it has already proved the key reaches each tier's bucket and
+that the tier contract holds ([ADR 0003](adr/0003-tier-contract.md)).
 
 For a database, set `offsite_backup_pre_command` to dump it into
 `$DUMP_DIR`. Never list a live database's files in
@@ -107,7 +112,7 @@ per host) is in [limitations](limitations.md).
 ```bash
 systemctl start offsite-backup.service
 journalctl -u offsite-backup.service -n 30
-scripts/restore-test --bucket yourorg-backup-host-a --prefix host-a \
+scripts/restore-test --bucket-prefix yourorg-backup-host-a --prefix host-a \
   --tier daily --identity operator.key --expect offsite-backup-dump/
 ```
 
@@ -116,10 +121,15 @@ heartbeat service too. Many answer `200` even to a wrong URL.
 
 ## 7. Lock it
 
-Once a restore test passes, switch the host to
-`offsite_backup_retention_mode: Locked`. From then on, nobody can delete
-or shorten an object before its tier expires, including the project
-owner. Objects written while Unlocked stay Unlocked.
+Once a restore test passes, set `locked = true` on the tiers you want
+locked, in Terraform, and apply. From then on, nobody can delete an
+object in those buckets before it is `retain_days` old, or shorten the
+policy, including the project owner. The lock applies to every object in
+the bucket, including those already there. Nothing changes on the host.
+
+Whether to lock a short tier is a choice. Unlocked, an operator can clear
+a mistake or a compromised host's junk. Locked, nobody can. See
+[`retention.md`](retention.md).
 
 ## Then, on a schedule
 

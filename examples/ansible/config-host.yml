@@ -8,9 +8,9 @@
     - role: ledurnan.gcs_backup.offsite_backup
       vars:
         offsite_backup_enabled: true
-        offsite_backup_bucket: yourorg-backup-config-host        # FROM TERRAFORM
-        offsite_backup_retention_mode: Locked
+        offsite_backup_bucket_name_prefix: yourorg-backup-config-host  # FROM TERRAFORM
         # FROM TERRAFORM: same names and retain_days as the module's tiers.
+        # Whether each tier is locked is set there, not here.
         offsite_backup_tiers:
           - { name: daily, retain_days: 7, when: always }
           - { name: weekly, retain_days: 90, when: "weekday:7" }

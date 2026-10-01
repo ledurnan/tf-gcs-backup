@@ -14,11 +14,17 @@ locals {
     "storage.objects.create",
     "storage.objects.get",
     "storage.objects.list",
-    # Set each object's retain-until at upload.
-    "storage.objects.setRetention",
-    # Read the bucket's lifecycle rules, so the host can refuse to upload
-    # when its tiers disagree with the bucket's (the tier contract).
+    # Read each tier bucket's retention policy and lifecycle rules, so the
+    # host can refuse to upload when its tiers disagree (the tier
+    # contract).
     "storage.buckets.get",
+  ]
+
+  # Never on a host that can be compromised: deleting, changing objects
+  # or buckets, choosing retention (ADR 0007), or changing who has access.
+  forbidden = [
+    for p in local.permissions : p
+    if length(regexall("delete|update|setRetention|overrideUnlockedRetention|setIamPolicy", p)) > 0
   ]
 }
 
@@ -26,13 +32,13 @@ resource "google_project_iam_custom_role" "writer" {
   project     = var.project
   role_id     = var.role_id
   title       = var.title
-  description = "Write-only access for off-site backups: create, read back, list and set retention. Never delete."
+  description = "Write-only access for off-site backups: create, read back and list. Never delete, never set retention."
   permissions = local.permissions
 
   lifecycle {
     precondition {
-      condition     = length([for p in local.permissions : p if strcontains(p, "delete")]) == 0
-      error_message = "The backup writer role must never grant a delete permission: a compromised host could then erase its own backups."
+      condition     = length(local.forbidden) == 0
+      error_message = "The backup writer role must never grant ${join(", ", local.forbidden)}: a compromised host could erase its backups, change them, or choose how long junk is kept."
     }
   }
 }

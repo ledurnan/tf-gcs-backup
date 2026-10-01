@@ -10,7 +10,7 @@ Install the file attached to a release:
 ```yaml
 # requirements.yml
 collections:
-  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.1.0/ledurnan-gcs_backup-0.1.0.tar.gz
+  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.2.0/ledurnan-gcs_backup-0.2.0.tar.gz
     type: url
 ```
 

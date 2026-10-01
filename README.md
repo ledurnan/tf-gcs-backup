@@ -1,15 +1,16 @@
 # tf-gcs-backup
 
 Off-site backups to Google Cloud Storage that a compromised host can't
-erase. Each host writes encrypted archives to its own bucket with a
-credential that can add objects but **never delete them**, and every
-object is protected by per-object retention until its tier expires.
+erase. Each host writes encrypted archives to its own buckets with a
+credential that can add objects but **never delete them** and never
+choose how long they're kept. Each retention tier is a bucket whose
+retention policy protects every object until the tier expires.
 
 Two halves, versioned together:
 
 |                    | What                                                                  | Where                                                            |
 | ------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **Receiving side** | Bucket, retention tiers, write-only role, service account             | Terraform: [`modules/`](modules/)                                |
+| **Receiving side** | A bucket per retention tier, write-only role, service account         | Terraform: [`modules/`](modules/)                                |
 | **Sending side**   | Dump step, archive, `age` encryption, upload, schedule, run reporting | Ansible collection `ledurnan.gcs_backup`: [`ansible/`](ansible/) |
 
 It holds no state, no secrets and no real project IDs. Each project that
@@ -20,20 +21,20 @@ values, credentials and Terraform state.
 
 ```hcl
 module "writer_role" {
-  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.1.0"
+  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
   project = "your-project-id"
 }
 
 module "host_a" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.1.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.2.0"
   project            = "your-project-id"
   location           = "europe-west2"
-  bucket_name        = "yourorg-backup-host-a"
+  bucket_name_prefix = "yourorg-backup-host-a" # buckets: <prefix>-<tier>
   service_account_id = "yourorg-backup-host-a"
   role_name          = module.writer_role.role_name
   tiers = [
     { name = "daily", retain_days = 7 },
-    { name = "weekly", retain_days = 28 },
+    { name = "weekly", retain_days = 28 }, # locked = true once restored
   ]
 }
 ```
@@ -41,7 +42,7 @@ module "host_a" {
 ```yaml
 # requirements.yml
 collections:
-  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.1.0/ledurnan-gcs_backup-0.1.0.tar.gz
+  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.2.0/ledurnan-gcs_backup-0.2.0.tar.gz
     type: url
 ```
 
@@ -57,8 +58,8 @@ database host side by side.
 
 ## Before you choose retention
 
-Retention is a data-protection decision, and **locked retention can't be
-shortened once an object is written**. Read
+Retention is a data-protection decision, and **a locked tier can't be
+shortened or emptied early, by anyone**. Read
 [`docs/retention.md`](docs/retention.md) before setting tiers for a host
 that holds personal data.
 
@@ -70,7 +71,9 @@ restored is a rumour.
 
 ## Scope
 
-v0.1 supports Debian and Ubuntu hosts with systemd. Not covered: other
+Upgrading from v0.1: [`docs/upgrading-to-v0.2.md`](docs/upgrading-to-v0.2.md).
+
+v0.2 supports Debian and Ubuntu hosts with systemd. Not covered: other
 clouds, VM or disk images, and deduplicating or incremental backup. This
 pattern writes a full copy per tier, trading storage efficiency for a
 host that can't delete its own backups. Everything else it doesn't

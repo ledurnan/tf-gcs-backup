@@ -13,8 +13,18 @@ run "grants_write_only_permissions" {
   }
 
   assert {
-    condition     = contains(google_project_iam_custom_role.writer.permissions, "storage.objects.setRetention") && contains(google_project_iam_custom_role.writer.permissions, "storage.buckets.get")
-    error_message = "The role needs setRetention (to lock objects) and buckets.get (for the tier contract)."
+    condition     = !contains(google_project_iam_custom_role.writer.permissions, "storage.objects.setRetention")
+    error_message = "The host must never choose retention (ADR 0007): no setRetention."
+  }
+
+  assert {
+    condition     = length([for p in google_project_iam_custom_role.writer.permissions : p if strcontains(p, "update") || strcontains(p, "setIamPolicy") || strcontains(p, "override")]) == 0
+    error_message = "The role must never change objects, buckets, access or retention."
+  }
+
+  assert {
+    condition     = toset(google_project_iam_custom_role.writer.permissions) == toset(["storage.objects.create", "storage.objects.get", "storage.objects.list", "storage.buckets.get"])
+    error_message = "The role grants exactly create, get and list on objects, and get on buckets (for the tier contract)."
   }
 }
 

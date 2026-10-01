@@ -9,10 +9,9 @@
     - role: ledurnan.gcs_backup.offsite_backup
       vars:
         offsite_backup_enabled: true
-        offsite_backup_bucket: yourorg-backup-database-host      # FROM TERRAFORM
-        # Personal data under a 35-day promise: start Unlocked, switch to
-        # Locked once a restore test has passed.
-        offsite_backup_retention_mode: Unlocked
+        offsite_backup_bucket_name_prefix: yourorg-backup-database-host  # FROM TERRAFORM
+        # Personal data under a 35-day promise. Lock the tiers (in
+        # Terraform) only once a restore test has passed.
         offsite_backup_tiers:
           - { name: daily, retain_days: 7, when: always }
           - { name: weekly, retain_days: 28, when: "weekday:7" }

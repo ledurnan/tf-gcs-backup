@@ -8,13 +8,13 @@ variable "project" {
   }
 }
 
-variable "bucket_name" {
-  description = "Bucket name. The GCS namespace is global, so an 'already exists' error can mean someone else's project."
+variable "bucket_name_prefix" {
+  description = "Start of every bucket name: each tier gets <bucket_name_prefix>-<tier name>. The GCS namespace is global, so an 'already exists' error can mean someone else's project."
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$", var.bucket_name))
-    error_message = "bucket_name must be 3-63 characters: lowercase letters, digits, dots, hyphens and underscores, starting and ending with a letter or digit."
+    condition     = can(regex("^[a-z0-9][a-z0-9._-]{0,60}[a-z0-9]$", var.bucket_name_prefix))
+    error_message = "bucket_name_prefix must be 2-62 characters: lowercase letters, digits, dots, hyphens and underscores, starting and ending with a letter or digit."
   }
 }
 
@@ -41,15 +41,22 @@ variable "storage_class" {
 
 variable "tiers" {
   description = <<-EOT
-    Retention tiers. Each object is written under "<name>/" and expires
-    after retain_days (plus lifecycle_slack_days). The same list, with the
-    same days, must be given to the sending side. Required: retention is a
-    data-protection decision, and locked retention can't be shortened
-    once an object is written.
+    Retention tiers. Each tier gets its own bucket,
+    <bucket_name_prefix>-<name>, whose retention policy keeps every object
+    for retain_days and whose expiry rule deletes it retain_days +
+    lifecycle_slack_days after upload. The same names and days must be
+    given to the sending side. Required: retention is a data-protection
+    decision.
+
+    locked locks the bucket's retention policy: from then on nobody,
+    including the project owner, can delete an object before it is
+    retain_days old or shorten the period. It can't be undone. Leave it
+    false until a restore test has passed.
   EOT
   type = list(object({
     name        = string
     retain_days = number
+    locked      = optional(bool, false)
   }))
 
   validation {
@@ -59,7 +66,7 @@ variable "tiers" {
 
   validation {
     condition     = alltrue([for t in var.tiers : can(regex("^[a-z0-9][a-z0-9-]{0,30}$", t.name))])
-    error_message = "Each tier name must be lowercase letters, digits and hyphens (1-31 characters), starting with a letter or digit. It becomes the object prefix."
+    error_message = "Each tier name must be lowercase letters, digits and hyphens (1-31 characters), starting with a letter or digit. It ends the tier's bucket name."
   }
 
   validation {
@@ -68,8 +75,8 @@ variable "tiers" {
   }
 
   validation {
-    condition     = alltrue([for t in var.tiers : t.retain_days >= 1 && floor(t.retain_days) == t.retain_days])
-    error_message = "Each tier's retain_days must be a whole number of at least 1."
+    condition     = alltrue([for t in var.tiers : t.retain_days >= 1 && t.retain_days <= 36500 && floor(t.retain_days) == t.retain_days])
+    error_message = "Each tier's retain_days must be a whole number from 1 to 36500 (the 100-year limit of a bucket retention policy)."
   }
 }
 
@@ -111,13 +118,13 @@ variable "service_account_display_name" {
 }
 
 variable "labels" {
-  description = "Labels applied to the bucket."
+  description = "Labels applied to every tier's bucket. Each also gets backup-tier = <tier name>."
   type        = map(string)
   default     = {}
 }
 
 variable "soft_delete_retention_seconds" {
-  description = "Soft-delete retention for the bucket. null leaves the bucket's current setting unmanaged. Soft delete keeps expired objects (and bills for them) for this long after lifecycle deletion."
+  description = "Soft-delete retention for each tier's bucket. null leaves the bucket's current setting unmanaged. Soft delete keeps expired objects (and bills for them) for this long after lifecycle deletion."
   type        = number
   default     = null
 }

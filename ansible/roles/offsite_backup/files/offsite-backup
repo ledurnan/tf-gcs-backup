@@ -5,27 +5,29 @@
 # not this copy.
 #
 # One run:
-#   1. check the bucket's expiry rules agree with this host's tiers (the
-#      tier contract); refuse to upload if not
+#   1. check each tier's bucket keeps and expires objects for the days
+#      this host expects (the tier contract); refuse to upload if not
 #   2. run the optional pre-backup hook (a database dump, an export) into
 #      a scratch directory
 #   3. tar the configured paths plus that dump, encrypt to the age
 #      recipients (the host holds no private key)
 #   4. refuse an archive that is larger than the configured ceiling, or
 #      that grew too much since the last good run (the size guard)
-#   5. upload one object per tier due today, each with a retain-until and
-#      retention mode, then read each back and compare sizes
+#   5. upload to the bucket of each tier due today, then read each object
+#      back and compare sizes. Retention is the bucket's: the host never
+#      chooses how long anything is kept (ADR 0007)
 #
 # Usage: offsite-backup [--check-contract]
 #   --check-contract  only run step 1, then exit
 #
 # Configuration, all under $OFFSITE_BACKUP_CONF_DIR (default /etc/offsite-backup):
-#   backup.conf   shell KEY=value lines: BUCKET, PREFIX, RETENTION_MODE,
+#   backup.conf   shell KEY=value lines: BUCKET_PREFIX, PREFIX,
 #                 LIFECYCLE_SLACK_DAYS, WORK_DIR, STATE_DIR, MAX_SIZE,
 #                 MAX_GROWTH_PERCENT, GROWTH_MIN_SIZE
 #                 (sizes in bytes, or with a K, M, G or T suffix: powers
 #                 of 1024)
 #   tiers         one tier per line: <name> <retain_days> <when> [<name_format>]
+#                   each tier's bucket is <BUCKET_PREFIX>-<name>
 #                   when: always | weekday:<1-7, Monday=1> | monthday:<01-28>
 #                   name_format: date(1) format for the object name
 #   paths         one absolute path per line
@@ -50,9 +52,8 @@ NOW="${OFFSITE_BACKUP_NOW:-$(date -u +%s)}"
 # shellcheck source=/dev/null
 . "$CONF_DIR/backup.conf"
 
-: "${BUCKET:?BUCKET is not set in backup.conf}"
+: "${BUCKET_PREFIX:?BUCKET_PREFIX is not set in backup.conf}"
 : "${PREFIX:?PREFIX is not set in backup.conf}"
-: "${RETENTION_MODE:?RETENTION_MODE is not set in backup.conf}"
 : "${LIFECYCLE_SLACK_DAYS:?LIFECYCLE_SLACK_DAYS is not set in backup.conf}"
 : "${WORK_DIR:?WORK_DIR is not set in backup.conf}"
 : "${STATE_DIR:?STATE_DIR is not set in backup.conf}"
@@ -78,11 +79,6 @@ die() {
 
 mkdir -p "$STATE_DIR"
 rm -f "$LAST_ERROR"
-
-case "$RETENTION_MODE" in
-  Locked | Unlocked) ;;
-  *) die "RETENTION_MODE must be Locked or Unlocked, not '$RETENTION_MODE'" ;;
-esac
 
 # Sizes accept a K, M, G or T suffix (powers of 1024).
 to_bytes() {
@@ -121,50 +117,60 @@ done <"$CONF_DIR/tiers"
 
 # --- 1. the tier contract ---------------------------------------------
 
-# The bucket expires "<tier>/" objects after retain_days + slack. If this
-# host's tiers disagree, objects would expire too early (before their
-# retention, so deletion fails and they linger) or be kept longer than
-# the consumer promised. Refuse to write anything until they agree.
+# Each tier's bucket must keep objects for exactly retain_days (its
+# retention policy) and delete them retain_days + slack after upload (an
+# expiry rule covering every object). If they disagree with this host,
+# objects would expire before anyone expects, or be kept longer than the
+# consumer promised. Refuse to write anything until every tier agrees.
+bucket_for() { printf '%s-%s' "$BUCKET_PREFIX" "$1"; }
+
 check_contract() {
-  local bucket_json expected
-  bucket_json="$(gcloud storage buckets describe "gs://${BUCKET}" --format=json)" \
-    || die "cannot read gs://${BUCKET}'s configuration (does the role grant storage.buckets.get?)"
-
-  expected=""
+  local i bucket bucket_json problems="" locked=()
   for i in "${!TIER_NAMES[@]}"; do
-    expected+="${TIER_NAMES[$i]} $((TIER_DAYS[i] + LIFECYCLE_SLACK_DAYS))"$'\n'
-  done
+    bucket="$(bucket_for "${TIER_NAMES[$i]}")"
+    bucket_json="$(gcloud storage buckets describe "gs://${bucket}" --format=json)" \
+      || die "cannot read gs://${bucket}'s configuration (does it exist, and does the role grant storage.buckets.get?)"
 
-  python3 -c '
+    python3 -c '
 import json, sys
 
 bucket = json.loads(sys.argv[1])
-rules = (bucket.get("lifecycle_config") or bucket.get("lifecycle") or {}).get("rule", [])
-have = {}
-for rule in rules:
+name, days, age = sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+problems = []
+
+policy = bucket.get("retention_policy") or bucket.get("retentionPolicy") or {}
+period = policy.get("retentionPeriod", policy.get("retention_period"))
+if period is None:
+    problems.append(f"{name} has no retention policy")
+elif int(period) != days * 86400:
+    problems.append(f"{name} keeps objects {int(period) / 86400:g} days, this host expects {days}")
+
+ages = []
+for rule in (bucket.get("lifecycle_config") or bucket.get("lifecycle") or {}).get("rule", []):
     if rule.get("action", {}).get("type") != "Delete":
         continue
     cond = rule.get("condition", {})
-    for prefix in cond.get("matchesPrefix", cond.get("matches_prefix", [])):
-        have[prefix] = cond.get("age")
+    # Only a rule that matches every object counts: no prefix, suffix or
+    # other filter, so nothing in the bucket escapes expiry.
+    if set(cond) == {"age"}:
+        ages.append(int(cond["age"]))
+if not ages:
+    problems.append(f"{name} has no expiry rule covering every object")
+elif min(ages) != age:
+    problems.append(f"{name} expires objects after {min(ages)} days, this host expects {age}")
 
-problems = []
-for line in sys.argv[2].splitlines():
-    if not line.strip():
-        continue
-    name, age = line.split()
-    got = have.get(name + "/")
-    if got is None:
-        problems.append(f"no expiry rule for {name}/")
-    elif int(got) != int(age):
-        problems.append(f"{name}/ expires after {got} days, this host expects {age}")
 if problems:
     print("; ".join(problems))
     sys.exit(1)
-' "$bucket_json" "$expected" >"$STATE_DIR/contract" 2>&1 \
-    || die "tier contract broken for gs://${BUCKET}: $(cat "$STATE_DIR/contract")"
+print("locked" if policy.get("isLocked", policy.get("is_locked")) in (True, "true", "True") else "unlocked")
+' "$bucket_json" "$bucket" "${TIER_DAYS[$i]}" "$((TIER_DAYS[i] + LIFECYCLE_SLACK_DAYS))" \
+      >"$STATE_DIR/contract" 2>&1 \
+      || { problems+="${problems:+; }$(cat "$STATE_DIR/contract")"; continue; }
+    locked+=("${TIER_NAMES[$i]}:$(cat "$STATE_DIR/contract")")
+  done
 
-  log info "tier contract holds for gs://${BUCKET}"
+  [ -z "$problems" ] || die "tier contract broken: $problems"
+  log info "tier contract holds for ${BUCKET_PREFIX}-* (${locked[*]})"
 }
 
 check_contract
@@ -249,21 +255,19 @@ fi
 # --- 5. upload ------------------------------------------------------------
 
 upload() {
-  local object="$1" retain_days="$2" until remote_size
-  until="$(date -u -d "@$((NOW + retain_days * 86400))" +%Y-%m-%dT%H:%M:%SZ)"
+  local url="$1" remote_size
 
-  gcloud storage cp "$WORK/backup.tar.age" "gs://${BUCKET}/${object}" \
-    --retain-until="$until" --retention-mode="$RETENTION_MODE" \
-    || die "upload of ${object} failed"
+  gcloud storage cp "$WORK/backup.tar.age" "$url" \
+    || die "upload of ${url} failed"
 
   # Read back. An upload that returns 0 but stored nothing useful is the
   # silent failure this whole design exists to catch.
-  remote_size="$(gcloud storage objects describe "gs://${BUCKET}/${object}" \
+  remote_size="$(gcloud storage objects describe "$url" \
     --format='value(size)' 2>/dev/null || true)"
   [ "$remote_size" = "$LOCAL_SIZE" ] \
-    || die "verify failed for ${object}: local ${LOCAL_SIZE} bytes, remote '${remote_size}'"
+    || die "verify failed for ${url}: local ${LOCAL_SIZE} bytes, remote '${remote_size}'"
 
-  log info "stored ${object} (${LOCAL_SIZE} bytes, ${RETENTION_MODE} until ${until})"
+  log info "stored ${url} (${LOCAL_SIZE} bytes)"
 }
 
 DAY_OF_WEEK="$(date -u -d "@$NOW" +%u)"
@@ -279,7 +283,7 @@ for i in "${!TIER_NAMES[@]}"; do
   [ "$due" -eq 1 ] || continue
 
   stamp="$(date -u -d "@$NOW" +"${TIER_FORMAT[$i]}")"
-  upload "${TIER_NAMES[$i]}/${PREFIX}/${stamp}.tar.age" "${TIER_DAYS[$i]}"
+  upload "gs://$(bucket_for "${TIER_NAMES[$i]}")/${PREFIX}/${stamp}.tar.age"
   uploaded=$((uploaded + 1))
 done
 

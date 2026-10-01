@@ -1,8 +1,7 @@
 ---
 offsite_backup_enabled: true
-offsite_backup_bucket: example-host-backup
+offsite_backup_bucket_name_prefix: example-host-backup
 offsite_backup_prefix: host-a
-offsite_backup_retention_mode: Unlocked
 offsite_backup_tiers:
   - { name: daily, retain_days: 7, when: always }
   - { name: weekly, retain_days: 35, when: "weekday:1" }

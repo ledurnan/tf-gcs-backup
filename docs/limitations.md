@@ -1,6 +1,6 @@
 # Limitations
 
-What v0.1 doesn't do, so you can check a host fits before adopting it.
+What it doesn't do, so you can check a host fits before adopting it.
 
 ## What gets backed up
 

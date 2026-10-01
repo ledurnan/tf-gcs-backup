@@ -11,19 +11,24 @@ You need:
 
 ## 1. Find the object
 
+Each tier is its own bucket, `<bucket name prefix>-<tier>`:
+
 ```bash
-gcloud storage ls gs://<bucket>/<tier>/<prefix>/
+gcloud storage ls gs://<bucket name prefix>-<tier>/<prefix>/
 ```
 
-Object names are dated within each tier (`daily/<prefix>/2026-06-03.tar.age`,
-`weekly/<prefix>/2026-W23.tar.age`, `monthly/<prefix>/2026-06.tar.age` by
-default), so the last one listed is the newest.
+Object names are dated (`<prefix>/2026-06-03.tar.age` daily,
+`<prefix>/2026-W23.tar.age` weekly, `<prefix>/2026-06.tar.age` monthly,
+by default), so the last one listed is the newest.
+
+Backups written by v0.1 are in a single bucket, under
+`gs://<bucket>/<tier>/<prefix>/`, until they expire.
 
 ## 2. Fetch and decrypt, into a scratch directory
 
 ```bash
 mkdir -p restore
-gcloud storage cp gs://<bucket>/daily/<prefix>/2026-06-03.tar.age .
+gcloud storage cp gs://<bucket name prefix>-daily/<prefix>/2026-06-03.tar.age .
 age -d -i operator.key 2026-06-03.tar.age | tar -xz -C ./restore
 ```
 
@@ -43,14 +48,15 @@ application keeps.
 ## Proving it before you need it
 
 ```bash
-scripts/restore-test --bucket <bucket> --prefix <prefix> --tier daily \
+scripts/restore-test --bucket-prefix <bucket name prefix> --prefix <prefix> --tier daily \
   --identity operator.key \
   --expect offsite-backup-dump/ --expect etc/letsencrypt/ \
   --report-url https://heartbeat.example/<id>
 ```
 
 It fetches the newest object, decrypts it, lists it, checks each
-`--expect` entry is present, and reports the result to the URL. It
+`--expect` entry is present, and reports the result to the URL. For a
+v0.1 bucket, pass `--bucket <bucket>` instead of `--bucket-prefix`. It
 extracts nothing. Schedule it where an operator key is available (never
 on the backed-up host), and run it after any change to paths, the dump or
 the keys.

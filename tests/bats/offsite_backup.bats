@@ -21,14 +21,13 @@ setup() {
   export FAKE_GCS_LOG="$T/gcloud.log"
   export FAKE_AGE_LOG="$T/age.log"
   export FAKE_CURL_LOG="$T/curl.log"
-  export FAKE_BUCKET_JSON="$T/bucket.json"
-  mkdir -p "$OFFSITE_BACKUP_CONF_DIR" "$FAKE_GCS_DIR" "$T/data/app"
+  export FAKE_BUCKETS_DIR="$T/buckets"
+  mkdir -p "$OFFSITE_BACKUP_CONF_DIR" "$FAKE_GCS_DIR" "$FAKE_BUCKETS_DIR" "$T/data/app"
   echo "hello" >"$T/data/app/file.txt"
 
   cat >"$OFFSITE_BACKUP_CONF_DIR/backup.conf" <<EOF
-BUCKET=example-bucket
+BUCKET_PREFIX=example
 PREFIX=host-a
-RETENTION_MODE=Unlocked
 LIFECYCLE_SLACK_DAYS=1
 WORK_DIR=$T/work
 STATE_DIR=$T/state
@@ -41,17 +40,24 @@ EOF
   echo "$T/data/app" >"$OFFSITE_BACKUP_CONF_DIR/paths"
   echo "age1exampleexampleexampleexampleexampleexampleexampleexampleex" \
     >"$OFFSITE_BACKUP_CONF_DIR/recipients"
-  bucket_rules daily:8 weekly:36 monthly:91
+  tier_buckets daily:7:8 weekly:35:36 monthly:90:91
 }
 
-# bucket_rules name:age ... writes the fake bucket's lifecycle config.
-bucket_rules() {
-  local rules="" sep=""
+# tier_buckets name:retain_days:expiry_age[:locked] ... writes each tier
+# bucket's configuration, as `gcloud storage buckets describe` shows it.
+# Any tier left out has no bucket.
+tier_buckets() {
+  rm -f "$FAKE_BUCKETS_DIR"/*.json
+  local spec name days age locked
   for spec in "$@"; do
-    rules+="$sep{\"action\":{\"type\":\"Delete\"},\"condition\":{\"age\":${spec#*:},\"matchesPrefix\":[\"${spec%%:*}/\"]}}"
-    sep=","
+    IFS=: read -r name days age locked <<<"$spec"
+    printf '{"name":"example-%s","retention_policy":{"isLocked":%s,"retentionPeriod":"%s"},"lifecycle_config":{"rule":[{"action":{"type":"Delete"},"condition":{"age":%s}}]}}\n' \
+      "$name" "${locked:-false}" "$((days * 86400))" "$age" >"$FAKE_BUCKETS_DIR/example-$name.json"
   done
-  echo "{\"name\":\"example-bucket\",\"lifecycle_config\":{\"rule\":[$rules]}}" >"$FAKE_BUCKET_JSON"
+}
+
+nothing_uploaded() {
+  [ -z "$(ls -A "$FAKE_GCS_DIR")" ]
 }
 
 run_backup() {
@@ -61,38 +67,39 @@ run_backup() {
 @test "an ordinary day uploads only the tiers that are due" {
   run_backup "$WEDNESDAY"
   [ "$status" -eq 0 ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-03.tar.age" ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket/weekly" ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket/monthly" ]
+  [ -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age" ]
+  [ ! -d "$FAKE_GCS_DIR/example-weekly" ]
+  [ ! -d "$FAKE_GCS_DIR/example-monthly" ]
 }
 
 @test "weekday and monthday tiers fire on their day, with their name formats" {
   run_backup "$MONDAY_FIRST"
   [ "$status" -eq 0 ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-01.tar.age" ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/weekly/host-a/2026-W23.tar.age" ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/monthly/host-a/2026-06.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-01.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-weekly/host-a/2026-W23.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-monthly/host-a/2026-06.tar.age" ]
 }
 
-@test "each upload carries its tier's retain-until and the retention mode" {
+@test "uploads go to each tier's bucket and never set retention" {
   run_backup "$MONDAY_FIRST"
   [ "$status" -eq 0 ]
-  grep -q "daily/host-a/2026-06-01.tar.age --retain-until=2026-06-08T00:00:00Z --retention-mode=Unlocked" "$FAKE_GCS_LOG"
-  grep -q "weekly/host-a/2026-W23.tar.age --retain-until=2026-07-06T00:00:00Z --retention-mode=Unlocked" "$FAKE_GCS_LOG"
+  grep -q "storage cp .* gs://example-daily/host-a/2026-06-01.tar.age$" "$FAKE_GCS_LOG"
+  grep -q "storage cp .* gs://example-weekly/host-a/2026-W23.tar.age$" "$FAKE_GCS_LOG"
+  ! grep -q -- "--retain-until\|--retention-mode" "$FAKE_GCS_LOG"
 }
 
 @test "a custom name format is used" {
   printf '%s\n' "hourly 2 always %Y%m%dT%H" >"$OFFSITE_BACKUP_CONF_DIR/tiers"
-  bucket_rules hourly:3
+  tier_buckets hourly:2:3
   run_backup "$WEDNESDAY"
   [ "$status" -eq 0 ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/hourly/host-a/20260603T00.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-hourly/host-a/20260603T00.tar.age" ]
 }
 
 @test "the archive holds the configured paths" {
   run_backup "$WEDNESDAY"
   [ "$status" -eq 0 ]
-  tar -tzf "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-03.tar.age" | grep -q "data/app/file.txt"
+  tar -tzf "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age" | grep -q "data/app/file.txt"
 }
 
 @test "the pre-backup hook's output is archived under offsite-backup-dump/" {
@@ -103,7 +110,7 @@ EOF
   chmod +x "$OFFSITE_BACKUP_CONF_DIR/pre-backup"
   run_backup "$WEDNESDAY"
   [ "$status" -eq 0 ]
-  tar -tzf "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-03.tar.age" | grep -q "offsite-backup-dump/database.sql"
+  tar -tzf "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age" | grep -q "offsite-backup-dump/database.sql"
 }
 
 @test "a pre-backup hook alone is enough, with no paths" {
@@ -119,7 +126,7 @@ EOF
   chmod +x "$OFFSITE_BACKUP_CONF_DIR/pre-backup"
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  nothing_uploaded
   grep -q "pre-backup hook failed" "$T/state/last-error"
 }
 
@@ -135,7 +142,7 @@ EOF
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
   grep -q "tar failed" "$T/state/last-error"
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  nothing_uploaded
 }
 
 @test "a relative path is refused" {
@@ -149,7 +156,7 @@ EOF
   FAKE_AGE_FAIL=1 OFFSITE_BACKUP_NOW="$WEDNESDAY" run "$BACKUP"
   [ "$status" -ne 0 ]
   grep -q "age encryption failed" "$T/state/last-error"
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  nothing_uploaded
 }
 
 @test "the recipients file is passed to age" {
@@ -164,38 +171,71 @@ EOF
   grep -q "verify failed" "$T/state/last-error"
 }
 
-@test "contract: a tier the bucket doesn't expire stops the run before any upload" {
-  bucket_rules daily:8 weekly:36
+@test "contract: a tier with no bucket stops the run before any upload" {
+  tier_buckets daily:7:8 weekly:35:36
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
-  grep -q "no expiry rule for monthly/" "$T/state/last-error"
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  grep -q "cannot read gs://example-monthly" "$T/state/last-error"
+  nothing_uploaded
 }
 
 @test "contract: a different expiry age stops the run" {
-  bucket_rules daily:8 weekly:91 monthly:91
+  tier_buckets daily:7:8 weekly:35:91 monthly:90:91
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
-  grep -q "weekly/ expires after 91 days, this host expects 36" "$T/state/last-error"
+  grep -q "example-weekly expires objects after 91 days, this host expects 36" "$T/state/last-error"
+  nothing_uploaded
+}
+
+@test "contract: a different retention period stops the run" {
+  tier_buckets daily:7:8 weekly:30:36 monthly:90:91
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  grep -q "example-weekly keeps objects 30 days, this host expects 35" "$T/state/last-error"
+  nothing_uploaded
+}
+
+@test "contract: every problem is reported, not just the first" {
+  tier_buckets daily:6:8 weekly:35:36 monthly:90:99
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  grep -q "example-daily keeps objects 6 days" "$T/state/last-error"
+  grep -q "example-monthly expires objects after 99 days" "$T/state/last-error"
+}
+
+@test "contract: a bucket with no retention policy stops the run" {
+  echo '{"name":"example-daily","lifecycle_config":{"rule":[{"action":{"type":"Delete"},"condition":{"age":8}}]}}' \
+    >"$FAKE_BUCKETS_DIR/example-daily.json"
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  grep -q "example-daily has no retention policy" "$T/state/last-error"
+}
+
+@test "contract: an expiry rule limited to a prefix doesn't count" {
+  echo '{"name":"example-daily","retention_policy":{"retentionPeriod":"604800"},"lifecycle_config":{"rule":[{"action":{"type":"Delete"},"condition":{"age":8,"matchesPrefix":["host-a/"]}}]}}' \
+    >"$FAKE_BUCKETS_DIR/example-daily.json"
+  run_backup "$WEDNESDAY"
+  [ "$status" -ne 0 ]
+  grep -q "example-daily has no expiry rule covering every object" "$T/state/last-error"
 }
 
 @test "contract: a bucket whose configuration can't be read stops the run" {
   FAKE_BUCKET_DESCRIBE_FAIL=1 OFFSITE_BACKUP_NOW="$WEDNESDAY" run "$BACKUP"
   [ "$status" -ne 0 ]
-  grep -q "cannot read gs://example-bucket" "$T/state/last-error"
+  grep -q "cannot read gs://example-daily" "$T/state/last-error"
+}
+
+@test "contract: each tier's lock state is logged" {
+  tier_buckets daily:7:8 weekly:35:36:true monthly:90:91:true
+  run_backup "$WEDNESDAY" --check-contract
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"daily:unlocked weekly:locked monthly:locked"* ]]
 }
 
 @test "contract: --check-contract checks and uploads nothing" {
   run_backup "$WEDNESDAY" --check-contract
   [ "$status" -eq 0 ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
-}
-
-@test "an invalid retention mode is refused" {
-  sed -i 's/^RETENTION_MODE=.*/RETENTION_MODE=Forever/' "$OFFSITE_BACKUP_CONF_DIR/backup.conf"
-  run_backup "$WEDNESDAY"
-  [ "$status" -ne 0 ]
-  grep -q "must be Locked or Unlocked" "$T/state/last-error"
+  nothing_uploaded
 }
 
 @test "an invalid tier schedule is refused" {
@@ -237,7 +277,7 @@ set_conf() {
   big_file 2000000
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  nothing_uploaded
   grep -q "over MAX_SIZE 1.0MiB" "$T/state/last-error"
 }
 
@@ -246,14 +286,14 @@ set_conf() {
   mkdir -p "$T/state" && touch "$T/state/accept-size"
   run_backup "$WEDNESDAY"
   [ "$status" -ne 0 ]
-  [ ! -d "$FAKE_GCS_DIR/example-bucket" ]
+  nothing_uploaded
   [ -e "$T/state/accept-size" ]
 }
 
 @test "size guard: a successful run records its size" {
   run_backup "$WEDNESDAY"
   [ "$status" -eq 0 ]
-  [ "$(cat "$T/state/last-size")" = "$(stat -c %s "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-03.tar.age")" ]
+  [ "$(cat "$T/state/last-size")" = "$(stat -c %s "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age")" ]
 }
 
 @test "size guard: growth beyond MAX_GROWTH_PERCENT uploads nothing" {
@@ -264,7 +304,7 @@ set_conf() {
   big_file 300000
   OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
   [ "$status" -ne 0 ]
-  [ ! -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+  [ ! -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-04.tar.age" ]
   grep -q "more than MAX_GROWTH_PERCENT 100%" "$T/state/last-error"
   grep -q "touch $T/state/accept-size" "$T/state/last-error"
   # A refused run leaves the baseline alone.
@@ -277,7 +317,7 @@ set_conf() {
   big_file 150000
   OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
   [ "$status" -eq 0 ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-04.tar.age" ]
 }
 
 @test "size guard: accept-size skips the growth check once, then is removed" {
@@ -287,7 +327,7 @@ set_conf() {
   touch "$T/state/accept-size"
   OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
   [ "$status" -eq 0 ]
-  [ -f "$FAKE_GCS_DIR/example-bucket/daily/host-a/2026-06-04.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-04.tar.age" ]
   [ ! -e "$T/state/accept-size" ]
   [ "$(cat "$T/state/last-size")" -gt 300000 ]
 }
@@ -341,7 +381,7 @@ set_conf() {
 @test "restore test: finds the newest object, decrypts it and checks expected entries" {
   run_backup "$WEDNESDAY"
   OFFSITE_BACKUP_NOW=$((WEDNESDAY + 86400)) run "$BACKUP"
-  run "$RESTORE" --bucket example-bucket --prefix host-a --tier daily \
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily \
     --identity /dev/null --expect "data/app/file.txt"
   [ "$status" -eq 0 ]
   [[ "$output" == *"2026-06-04.tar.age"* ]]
@@ -350,13 +390,29 @@ set_conf() {
 
 @test "restore test: a missing expected entry fails" {
   run_backup "$WEDNESDAY"
-  run "$RESTORE" --bucket example-bucket --prefix host-a --tier daily \
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily \
     --identity /dev/null --expect "data/app/not-there.txt"
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAIL"* ]]
 }
 
 @test "restore test: no objects fails" {
-  run "$RESTORE" --bucket example-bucket --prefix host-a --tier daily --identity /dev/null
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily --identity /dev/null
   [ "$status" -ne 0 ]
 }
+
+@test "restore test: --bucket still reads a v0.1 bucket holding every tier" {
+  mkdir -p "$FAKE_GCS_DIR/old-bucket/daily/host-a"
+  run_backup "$WEDNESDAY"
+  cp "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age" "$FAKE_GCS_DIR/old-bucket/daily/host-a/"
+  run "$RESTORE" --bucket old-bucket --prefix host-a --tier daily \
+    --identity /dev/null --expect "data/app/file.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gs://old-bucket/daily/host-a/2026-06-03.tar.age"* ]]
+}
+
+@test "restore test: --bucket and --bucket-prefix together are refused" {
+  run "$RESTORE" --bucket old --bucket-prefix example --prefix host-a --tier daily --identity /dev/null
+  [ "$status" -eq 2 ]
+}
+

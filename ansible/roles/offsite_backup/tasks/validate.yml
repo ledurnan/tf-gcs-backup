@@ -3,11 +3,26 @@
 # before anything changes on the host, and each message names the fix.
 # Kept separate so tests can run it against localhost.
 
+# v0.1 settings that no longer exist. Fail loudly rather than ignore
+# them: someone setting a retention mode here expects it to do something.
+- name: Assert no v0.1 settings remain
+  ansible.builtin.assert:
+    that:
+      - offsite_backup_retention_mode is not defined
+      - offsite_backup_bucket is not defined
+    fail_msg: >-
+      offsite_backup_retention_mode and offsite_backup_bucket were removed
+      in v0.2. Each tier now has its own bucket, and its retention (and
+      whether it is locked) is set in Terraform, never on the host:
+      remove offsite_backup_retention_mode, and replace
+      offsite_backup_bucket with offsite_backup_bucket_name_prefix (the
+      module's bucket_name_prefix output). See docs/upgrading-to-v0.2.md.
+    quiet: true
+
 - name: Assert the required settings are present
   ansible.builtin.assert:
     that:
-      - offsite_backup_bucket | length > 0
-      - offsite_backup_retention_mode in ['Locked', 'Unlocked']
+      - offsite_backup_bucket_name_prefix | length > 0
       - offsite_backup_tiers | length > 0
       - offsite_backup_age_recipients | length > 0
       - offsite_backup_sa_key | length > 0
@@ -15,11 +30,29 @@
       - (offsite_backup_paths | length > 0) or (offsite_backup_pre_command | length > 0)
     fail_msg: >-
       offsite_backup_enabled is true but the role is not fully configured.
-      Required: offsite_backup_bucket, offsite_backup_retention_mode
-      (Locked or Unlocked), offsite_backup_tiers, offsite_backup_age_recipients,
+      Required: offsite_backup_bucket_name_prefix, offsite_backup_tiers,
+      offsite_backup_age_recipients,
       offsite_backup_sa_key, offsite_backup_max_size, and at least one of
       offsite_backup_paths or offsite_backup_pre_command.
     quiet: true
+
+# GCS bucket names are at most 63 characters; each tier's is
+# <prefix>-<tier name>.
+- name: Assert every tier's bucket name is valid
+  ansible.builtin.assert:
+    that:
+      - offsite_backup_bucket_name_prefix is match('^[a-z0-9][a-z0-9._-]*[a-z0-9]$')
+      - (offsite_backup_bucket_name_prefix ~ '-' ~ item.name | default('')) | length <= 63
+    fail_msg: >-
+      Bucket {{ offsite_backup_bucket_name_prefix }}-{{ item.name | default('?') }}
+      is not a valid bucket name: offsite_backup_bucket_name_prefix must be
+      lowercase letters, digits, dots, hyphens and underscores, and each
+      <prefix>-<tier> at most 63 characters. Use the module's
+      bucket_name_prefix output.
+    quiet: true
+  loop: "{{ offsite_backup_tiers }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
 
 - name: Assert the object prefix is a safe path segment
   ansible.builtin.assert:

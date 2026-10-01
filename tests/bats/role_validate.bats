@@ -27,9 +27,11 @@ refused() {
   [ "$status" -eq 0 ]
 }
 
-@test "refused: no bucket" { refused '{"offsite_backup_bucket": ""}'; }
-@test "refused: no retention mode" { refused '{"offsite_backup_retention_mode": ""}'; }
-@test "refused: unknown retention mode" { refused '{"offsite_backup_retention_mode": "Forever"}'; }
+@test "refused: no bucket name prefix" { refused '{"offsite_backup_bucket_name_prefix": ""}'; }
+@test "refused: a bucket name prefix with capitals" { refused '{"offsite_backup_bucket_name_prefix": "Example-Host"}'; }
+@test "refused: a tier bucket name over 63 characters" { refused '{"offsite_backup_bucket_name_prefix": "a-very-long-bucket-name-prefix-that-leaves-no-room-at-all"}'; }
+@test "refused: a v0.1 retention mode" { refused '{"offsite_backup_retention_mode": "Locked"}'; }
+@test "refused: a v0.1 bucket" { refused '{"offsite_backup_bucket": "example-host-backup"}'; }
 @test "refused: no tiers" { refused '{"offsite_backup_tiers": []}'; }
 @test "refused: no recipients" { refused '{"offsite_backup_age_recipients": []}'; }
 @test "refused: a private key as a recipient" { refused '{"offsite_backup_age_recipients": ["AGE-SECRET-KEY-1EXAMPLE"]}'; }
