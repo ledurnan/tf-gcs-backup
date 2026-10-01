@@ -11,4 +11,4 @@ them.
 | [0003](0003-tier-contract.md)                | The host checks the bucket's expiry rules before every run           | Proposed       |
 | [0004](0004-terraform-and-provider-range.md) | Terraform 1.7+, Google provider 7.x to 8.x; OpenTofu untested        | Proposed       |
 | [0005](0005-distribution.md)                 | Modules by git tag, the role as a collection from the same tag       | Proposed       |
-| [0006](0006-ownership.md)                    | Ownership of a personal repo used by work projects                   | Proposed, open |
+| [0006](0006-ownership.md)                    | Work projects depend on it like any external project                 | Accepted       |

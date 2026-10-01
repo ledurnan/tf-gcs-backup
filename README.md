@@ -73,6 +73,9 @@ restored is a rumour.
 v0.1 supports Debian and Ubuntu hosts with systemd. Not covered: other
 clouds, VM or disk images, and deduplicating or incremental backup. This
 pattern writes a full copy per tier, trading storage efficiency for a
-host that can't delete its own backups.
+host that can't delete its own backups. Everything else it doesn't
+do is in [`docs/limitations.md`](docs/limitations.md).
 
-Decisions are recorded in [`docs/adr/`](docs/adr/README.md).
+What it protects against, and what it doesn't yet, is in
+[`docs/threat-model.md`](docs/threat-model.md). Decisions are recorded in
+[`docs/adr/`](docs/adr/README.md).
