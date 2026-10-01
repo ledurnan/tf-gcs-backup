@@ -21,10 +21,12 @@ provider "google" {
   project = var.project
 }
 
-# Once per project: the write-only role every host is bound to.
+# Once per consumer: the write-only role every host of yours is bound to,
+# and the emergency role. Names are yours alone (ADR 0009).
 module "writer_role" {
-  source  = "../../modules/project-role"
-  project = var.project
+  source         = "../../modules/project-role"
+  project        = var.project
+  role_id_prefix = var.role_id_prefix
 }
 
 # A host whose irreplaceable state is a few megabytes of configuration.

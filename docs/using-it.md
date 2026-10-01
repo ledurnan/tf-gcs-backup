@@ -10,14 +10,20 @@ Run [`scripts/bootstrap-project`](../scripts/bootstrap-project) and read
 dedicated service account through `scripts/tf-with-identity`, never on
 application-default credentials.
 
-## 1. Once per project: the write-only role
+## 1. Once per consumer: the roles
 
 ```hcl
 module "writer_role" {
-  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
-  project = "your-project-id"
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
+  project        = "your-project-id"
+  role_id_prefix = "yourorgBackup"
 }
 ```
+
+This creates `yourorgBackupWriter` and `yourorgBackupEmergency`. Choose a
+prefix of your own even if the project is yours alone today: if other
+projects of yours share this GCP project later, each needs its own
+roles, bucket names and service accounts ([ADR 0009](adr/0009-consumers-sharing-a-project.md)).
 
 It also creates an emergency role for clearing an unlocked tier
 ([ADR 0008](adr/0008-emergency-access-to-unlocked-tiers.md)), unused

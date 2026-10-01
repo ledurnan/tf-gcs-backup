@@ -1,5 +1,5 @@
 variable "project" {
-  description = "Google Cloud project that holds the backup buckets. The role is created once per project and shared by every backup target in it."
+  description = "Google Cloud project that holds the backup buckets. Each consumer creates its own roles here, named by role_id_prefix, and shares them across its own backup targets."
   type        = string
 
   validation {
@@ -8,38 +8,26 @@ variable "project" {
   }
 }
 
-variable "role_id" {
-  description = "ID of the custom role. Change it only to run two independent copies of this pattern in one project."
+variable "role_id_prefix" {
+  description = <<-EOT
+    Start of both custom role IDs: <prefix>Writer and <prefix>Emergency,
+    for example sendhopBackup -> sendhopBackupWriter. Required, and
+    unique to each consumer: role IDs are unique within a project, so two
+    consumers sharing a project with the same names would each keep
+    rewriting the other's roles (ADR 0009).
+  EOT
   type        = string
-  default     = "offsiteBackupWriter"
 
   validation {
-    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.role_id))
-    error_message = "role_id must be 3-64 characters of letters, digits, underscores or dots (a Google Cloud custom role ID)."
+    condition     = can(regex("^[a-zA-Z][a-zA-Z0-9_.]{2,54}$", var.role_id_prefix))
+    error_message = "role_id_prefix must be 3-55 letters, digits, underscores or dots, starting with a letter. Hyphens aren't allowed in role IDs: use sendhopBackup, not sendhop-backup."
   }
 }
 
-variable "title" {
-  description = "Human-readable title of the custom role."
+variable "title_prefix" {
+  description = "Start of both roles' human-readable titles. Defaults to role_id_prefix."
   type        = string
-  default     = "Offsite backup writer (no delete)"
-}
-
-variable "emergency_role_id" {
-  description = "ID of the emergency custom role (ADR 0008). Change it only to run two independent copies of this pattern in one project."
-  type        = string
-  default     = "offsiteBackupEmergency"
-
-  validation {
-    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.emergency_role_id))
-    error_message = "emergency_role_id must be 3-64 characters of letters, digits, underscores or dots (a Google Cloud custom role ID)."
-  }
-}
-
-variable "emergency_title" {
-  description = "Human-readable title of the emergency custom role."
-  type        = string
-  default     = "Offsite backup emergency (unlocked tiers only)"
+  default     = null
 }
 
 variable "role_propagation_seconds" {

@@ -19,7 +19,7 @@ that, which is threat T12, not a route to rely on).
 
 ## Decision
 
-`project-role` creates a second custom role, **`offsiteBackupEmergency`**,
+`project-role` creates a second custom role, **`<role_id_prefix>Emergency`**,
 with exactly:
 
 - `storage.buckets.get` and `storage.buckets.update`, to see and remove

@@ -19,18 +19,11 @@ variable "sa_prefix" {
   default     = "tfgcsb"
 }
 
-# Never the default (offsiteBackupWriter): another configuration in the
-# same project may own that role, and v0.2 changes its permissions.
-variable "role_id" {
-  description = "Custom role ID for the validation's writer role."
+# This validation's own role names (ADR 0009): never another consumer's.
+variable "role_id_prefix" {
+  description = "Start of the validation's role IDs."
   type        = string
-  default     = "tfgcsbValidationWriter"
-}
-
-variable "emergency_role_id" {
-  description = "Custom role ID for the validation's emergency role."
-  type        = string
-  default     = "tfgcsbValidationEmergency"
+  default     = "tfgcsbValidation"
 }
 
 variable "labels" {

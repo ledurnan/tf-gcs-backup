@@ -28,6 +28,8 @@ locals {
     if length(regexall("delete|update|setRetention|overrideUnlockedRetention|setIamPolicy", p)) > 0
   ]
 
+  title_prefix = coalesce(var.title_prefix, var.role_id_prefix)
+
   # Emergency access to an unlocked tier (ADR 0008): remove or shorten
   # the bucket's retention policy, then delete what shouldn't be there.
   # objects.get because gcloud reads an object's metadata before deleting
@@ -51,8 +53,8 @@ locals {
 
 resource "google_project_iam_custom_role" "writer" {
   project     = var.project
-  role_id     = var.role_id
-  title       = var.title
+  role_id     = "${var.role_id_prefix}Writer"
+  title       = "${local.title_prefix} backup writer (no delete)"
   description = "Write-only access for off-site backups: create, read back and list. Never delete, never set retention."
   permissions = local.permissions
 
@@ -66,8 +68,8 @@ resource "google_project_iam_custom_role" "writer" {
 
 resource "google_project_iam_custom_role" "emergency" {
   project     = var.project
-  role_id     = var.emergency_role_id
-  title       = var.emergency_title
+  role_id     = "${var.role_id_prefix}Emergency"
+  title       = "${local.title_prefix} backup emergency (unlocked tiers only)"
   description = "Emergency access to unlocked backup tiers: remove or shorten the retention policy, then delete objects. Never add objects or change access."
   permissions = local.emergency_permissions
 

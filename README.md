@@ -21,8 +21,9 @@ values, credentials and Terraform state.
 
 ```hcl
 module "writer_role" {
-  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
-  project = "your-project-id"
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
+  project        = "your-project-id"
+  role_id_prefix = "yourorgHostA" # roles yourorgHostAWriter, yourorgHostAEmergency
 }
 
 module "host_a" {
