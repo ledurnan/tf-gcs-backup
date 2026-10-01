@@ -48,6 +48,11 @@ The steps for using it are in [`docs/emergency.md`](../emergency.md).
   never on a backed-up host, not anyone's everyday account, with strong
   authentication. A group whose membership is changed only in an
   emergency keeps standing access at zero.
+- A project owner's own account is an acceptable interim member until
+  that group exists: an owner can already do everything the role allows,
+  so naming them adds no access and only records who the route is.
+  Switching later, with the same map key, replaces one binding per
+  unlocked tier.
 - `storage.buckets.update` also allows other bucket changes: the expiry
   rule, labels, or **locking** the policy (which can't be undone).
   Terraform reports any of these as drift on the next plan, and
