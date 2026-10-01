@@ -1,7 +1,8 @@
 mock_provider "google" {}
 
 variables {
-  project = "example-project"
+  project        = "example-project"
+  role_id_prefix = "exampleBackup"
 }
 
 run "grants_write_only_permissions" {
@@ -28,23 +29,28 @@ run "grants_write_only_permissions" {
   }
 }
 
-run "role_name_output_is_the_full_name" {
+run "role_ids_come_from_the_consumer_prefix" {
   command = plan
 
   assert {
-    condition     = google_project_iam_custom_role.writer.role_id == "offsiteBackupWriter"
-    error_message = "Default role_id changed; that breaks existing consumers."
+    condition     = google_project_iam_custom_role.writer.role_id == "exampleBackupWriter" && google_project_iam_custom_role.emergency.role_id == "exampleBackupEmergency"
+    error_message = "Both role IDs must be <role_id_prefix>Writer and <role_id_prefix>Emergency."
+  }
+
+  assert {
+    condition     = google_project_iam_custom_role.writer.title == "exampleBackup backup writer (no delete)"
+    error_message = "Titles default to the prefix."
   }
 }
 
-run "rejects_an_invalid_role_id" {
+run "rejects_a_role_id_prefix_with_hyphens" {
   command = plan
 
   variables {
-    role_id = "no spaces!"
+    role_id_prefix = "mailsvc-backup"
   }
 
-  expect_failures = [var.role_id]
+  expect_failures = [var.role_id_prefix]
 }
 
 run "emergency_role_can_only_clear" {
@@ -55,21 +61,8 @@ run "emergency_role_can_only_clear" {
     error_message = "The emergency role grants exactly: read and update the bucket (its retention policy), list, get and delete objects."
   }
 
-  assert {
-    condition     = google_project_iam_custom_role.emergency.role_id == "offsiteBackupEmergency"
-    error_message = "Default emergency_role_id changed; that breaks existing consumers."
-  }
 }
 
-run "rejects_an_invalid_emergency_role_id" {
-  command = plan
-
-  variables {
-    emergency_role_id = "no spaces!"
-  }
-
-  expect_failures = [var.emergency_role_id]
-}
 
 run "role_names_wait_for_the_roles_to_be_usable" {
   command = plan

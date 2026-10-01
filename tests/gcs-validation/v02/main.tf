@@ -22,13 +22,10 @@ provider "google" {
 }
 
 module "writer_role" {
-  source  = "../../../modules/project-role"
-  project = var.project
-  role_id = var.role_id
-  title   = "tf-gcs-backup validation writer (disposable)"
-
-  emergency_role_id = var.emergency_role_id
-  emergency_title   = "tf-gcs-backup validation emergency (disposable)"
+  source         = "../../../modules/project-role"
+  project        = var.project
+  role_id_prefix = var.role_id_prefix # tfgcsbValidationWriter, tfgcsbValidationEmergency
+  title_prefix   = "tf-gcs-backup validation (disposable)"
 }
 
 # Stands in for an operator's break-glass identity (ADR 0008).

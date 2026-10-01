@@ -18,8 +18,9 @@ key keeps working, and the custom role, if it has the same ID.
 
 ## 1. Write the module call
 
-Use the existing `service_account_id`, and the role's `role_id` if you
-are keeping it. Choose a `bucket_name_prefix` whose tier buckets
+Use the existing `service_account_id`. If the existing role's ID ends in
+`Writer`, you can keep it by setting `role_id_prefix` to the part before
+that; otherwise the module creates a new role. Choose a `bucket_name_prefix` whose tier buckets
 (`<prefix>-<tier>`) don't exist yet. Read the existing names first:
 
 ```bash

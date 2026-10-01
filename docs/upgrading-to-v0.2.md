@@ -27,8 +27,31 @@ the tiers you want locked as soon as a restore test passes.
 
 ## 1. Terraform
 
-Change the `ref` to `v0.2.0` and rename `bucket_name` to
-`bucket_name_prefix`. Keeping the same value is fine: the new buckets are
+Change the `ref` to `v0.2.0`, rename `bucket_name` to
+`bucket_name_prefix`, and give `project-role` a `role_id_prefix`, which
+is now required ([ADR 0009](adr/0009-consumers-sharing-a-project.md)).
+
+```hcl
+module "writer_role" {
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
+  project        = "your-project-id"
+  role_id_prefix = "yourorgBackup"   # roles yourorgBackupWriter, yourorgBackupEmergency
+}
+```
+
+v0.1 created the role `offsiteBackupWriter`. A new prefix means a new
+role, and Terraform would try to delete the old one, which its identity
+isn't allowed to do. So tell Terraform to forget the old role first. It
+stays in the project, still bound to the old bucket until this apply
+removes that binding:
+
+```bash
+terraform state rm 'module.writer_role.google_project_iam_custom_role.writer'
+```
+
+Once every host of yours is on v0.2, a project owner deletes it:
+`gcloud iam roles delete offsiteBackupWriter --project=<project>`. Check
+first that no other consumer in the project still uses it. Keeping the same value is fine: the new buckets are
 `<value>-<tier>`, so they don't clash with the old bucket.
 
 ```hcl
@@ -53,8 +76,9 @@ Check that `<prefix>-<longest tier name>` fits in 63 characters.
 
 And once per project:
 
-- the writer role (`module.writer_role`) **updated in place**, losing
-  `storage.objects.setRetention`;
+- the writer role `<prefix>Writer` **created**, without
+  `storage.objects.setRetention` (the old `offsiteBackupWriter` is no
+  longer in state, so it isn't touched);
 - the emergency role and a `time_sleep` **created**
   ([ADR 0008](adr/0008-emergency-access-to-unlocked-tiers.md)). The apply
   pauses for a minute after creating the role. `terraform init -upgrade`
