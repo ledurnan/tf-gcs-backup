@@ -1,13 +1,26 @@
 #!/bin/bash
-# Fake curl: records the URL and body it would have sent.
+# Fake curl: records the URL and body it would have sent, and its own
+# arguments. With `--config -` it reads `url = "..."` from stdin, as the
+# real one does.
 set -eu
-url="" body=""
+echo "$*" >>"$FAKE_CURL_LOG.args"
+url="" body="" config=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -d) body="$2"; shift 2 ;;
+    -K|--config) config="$2"; shift 2 ;;
     -H|-X|-m|-o) shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
+if [ "$config" = - ]; then
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^url\ =\ \"(.*)\"$ ]]; then
+      url="${BASH_REMATCH[1]}"
+      url="${url//\\\"/\"}"
+      url="${url//\\\\/\\}"
+    fi
+  done
+fi
 echo "$url $body" >>"$FAKE_CURL_LOG"

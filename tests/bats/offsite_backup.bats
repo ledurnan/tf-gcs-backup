@@ -372,6 +372,20 @@ set_conf() {
   grep -q 'tar failed with rc=2' "$FAKE_CURL_LOG"
 }
 
+@test "report: the URL is never a curl argument" {
+  REPORT_URL=https://heartbeat.example/abc SERVICE_RESULT=success \
+    OFFSITE_BACKUP_STATE_DIR="$T/state" run "$REPORT"
+  [ "$status" -eq 0 ]
+  ! grep -q 'heartbeat.example' "$FAKE_CURL_LOG.args"
+}
+
+@test "report: a URL with a quote or backslash arrives intact" {
+  REPORT_URL='https://heartbeat.example/a"b\c' SERVICE_RESULT=success \
+    OFFSITE_BACKUP_STATE_DIR="$T/state" run "$REPORT"
+  [ "$status" -eq 0 ]
+  grep -qF 'https://heartbeat.example/a"b\c {"status":"ok"}' "$FAKE_CURL_LOG"
+}
+
 @test "report: no URL, no report, no failure" {
   SERVICE_RESULT=success OFFSITE_BACKUP_STATE_DIR="$T/state" run "$REPORT"
   [ "$status" -eq 0 ]
@@ -386,6 +400,77 @@ set_conf() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"2026-06-04.tar.age"* ]]
   [[ "$output" == *"PASS"* ]]
+}
+
+# The host can write any name under its prefix. Neither a name that sorts
+# last nor one that isn't a backup may stand in for the newest backup.
+@test "restore test: newest is by creation time, not by name" {
+  run_backup "$WEDNESDAY"
+  local dir="$FAKE_GCS_DIR/example-daily/host-a"
+  cp "$dir/2026-06-03.tar.age" "$dir/9999-decoy.tar.age"
+  touch -d '2026-06-01 00:00:00 UTC' "$dir/9999-decoy.tar.age"
+  echo junk >"$dir/2026-06-04.tar.age"
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily --identity /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"2026-06-04.tar.age decrypted but is not a readable archive"* ]]
+}
+
+@test "restore test: an object that isn't a backup is never the one tested" {
+  run_backup "$WEDNESDAY"
+  local dir="$FAKE_GCS_DIR/example-daily/host-a"
+  touch -d '2026-06-02 00:00:00 UTC' "$dir/2026-06-03.tar.age"
+  cp "$dir/2026-06-03.tar.age" "$dir/zzz"
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily --identity /dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring 1 object(s)"* ]]
+  [[ "$output" == *"PASS: gs://example-daily/host-a/2026-06-03.tar.age"* ]]
+}
+
+@test "restore test: only objects that aren't backups fails" {
+  mkdir -p "$FAKE_GCS_DIR/example-bucket/daily/host-a"
+  echo x >"$FAKE_GCS_DIR/example-bucket/daily/host-a/zzz"
+  run "$RESTORE" --bucket example-bucket --prefix host-a --tier daily --identity /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no backup objects"* ]]
+}
+
+@test "restore test: --max-age fails a newest backup that is too old" {
+  run_backup "$WEDNESDAY"
+  local obj="$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age"
+  touch -d "@$WEDNESDAY" "$obj"
+  RESTORE_TEST_NOW=$((WEDNESDAY + 25 * 3600)) run "$RESTORE" --bucket-prefix example \
+    --prefix host-a --tier daily --identity /dev/null --max-age 26
+  [ "$status" -eq 0 ]
+  RESTORE_TEST_NOW=$((WEDNESDAY + 27 * 3600)) run "$RESTORE" --bucket-prefix example \
+    --prefix host-a --tier daily --identity /dev/null --max-age 26
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"was created 27h ago (limit 26h)"* ]]
+}
+
+@test "restore test: the report URL comes from a file and is never an argument" {
+  run_backup "$WEDNESDAY"
+  echo "https://heartbeat.example/restore" >"$T/report-url"
+  run "$RESTORE" --bucket-prefix example --prefix host-a --tier daily \
+    --identity /dev/null --report-url-file "$T/report-url"
+  [ "$status" -eq 0 ]
+  grep -q 'https://heartbeat.example/restore {"status":"ok"}' "$FAKE_CURL_LOG"
+  ! grep -q 'heartbeat.example' "$FAKE_CURL_LOG.args"
+}
+
+@test "restore test: the report URL can come from the environment" {
+  run_backup "$WEDNESDAY"
+  RESTORE_TEST_REPORT_URL=https://heartbeat.example/env run "$RESTORE" \
+    --bucket-prefix example --prefix host-a --tier daily --identity /dev/null \
+    --expect "data/app/not-there.txt"
+  [ "$status" -ne 0 ]
+  grep -q 'https://heartbeat.example/env {"status":"failed"' "$FAKE_CURL_LOG"
+}
+
+@test "restore test: --report-url is refused" {
+  run "$RESTORE" --bucket example-bucket --prefix host-a --tier daily \
+    --identity /dev/null --report-url https://heartbeat.example/x
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--report-url-file"* ]]
 }
 
 @test "restore test: a missing expected entry fails" {
