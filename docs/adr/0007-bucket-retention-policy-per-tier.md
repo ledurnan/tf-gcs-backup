@@ -1,6 +1,6 @@
 # 0007: Retention is a bucket policy, one bucket per tier
 
-- Status: Proposed
+- Status: Accepted
 - Amends [0001](0001-one-bucket-per-host.md) (one bucket per host
   becomes one bucket per host per tier) and
   [0003](0003-tier-contract.md) (the tier contract checks retention as
@@ -84,8 +84,16 @@ its retention period and an expiry rule covering every object.
   rules ([`upgrading-to-v0.2.md`](../upgrading-to-v0.2.md)). Hosts must
   be moved to v0.2 straight after the Terraform apply: the writer role
   loses `setRetention`, so v0.1 uploads fail until then.
-- **Behaviour still to confirm on real GCS** (see #7): that an unlocked
-  policy can be removed and its objects deleted by an operator, that a
-  writer without `setRetention` can't set object retention, how
-  `gcloud storage buckets describe` reports the policy, and whether a
-  locked policy blocks deleting the project.
+- **Confirmed on real GCS** (2026-10-01, `tests/gcs-validation/`, #15):
+  - `gcloud storage buckets describe` reports `retention_policy.retentionPeriod`
+    as a string and leaves out `isLocked` when unlocked;
+  - the writer is refused setting retention or holds, deleting and
+    overwriting;
+  - an operator can remove an unlocked policy and then delete;
+  - nobody, the owner included, can delete from a locked tier or remove
+    or shorten its policy;
+  - the v0.1 → v0.2 upgrade plan matched `upgrading-to-v0.2.md`.
+
+  GCS places a lien on project deletion as soon as any storage is under
+  retention, locked or not. Whether that blocks deleting the project is
+  checked at cleanup (#15).

@@ -1,6 +1,6 @@
 # 0008: Emergency access to unlocked tiers
 
-- Status: Proposed
+- Status: Accepted
 
 ## Context
 
