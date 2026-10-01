@@ -1,0 +1,8 @@
+# Real project IDs and accounts stay out of this public repository.
+validation.tfvars
+.tf-identity
+.state/
+.logs/
+.terraform/
+.terraform.lock.hcl
+*.tfplan

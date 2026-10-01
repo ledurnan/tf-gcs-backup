@@ -25,7 +25,7 @@ tflint: ## Lint the modules and the example
 	done
 
 shellcheck: ## Lint every shell script
-	shellcheck -x ansible/roles/offsite_backup/files/* scripts/restore-test scripts/bootstrap-project scripts/tf-with-identity tests/bats/fakes/*
+	shellcheck -x ansible/roles/offsite_backup/files/* scripts/restore-test scripts/bootstrap-project scripts/tf-with-identity tests/bats/fakes/* tests/gcs-validation/probe
 
 bats: ## Script tests and role validation tests
 	bats tests/bats

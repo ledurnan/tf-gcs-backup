@@ -1,0 +1,6 @@
+# Copy to validation.tfvars (git-ignored) and fill in.
+project     = "your-project-id"
+location    = "europe-west2"
+# Every bucket starts with this: <name_prefix>-val-daily, -val-locked,
+# -upg, -upg-daily. Bucket names are global, so make it distinctive.
+name_prefix = "yourproject-tfgcsb"
