@@ -28,6 +28,28 @@ gcloud iam service-accounts list --project=<project>
 gcloud iam roles describe <role_id> --project=<project>
 ```
 
+Read back what the host's service account can already do, too. Terraform
+will manage its grants on the new tier buckets and **will not show or
+remove any other**: a grant made before this pattern stays in force after
+the import, outside the plan.
+
+```bash
+gcloud storage buckets get-iam-policy gs://<old bucket>
+gcloud projects get-iam-policy <project> \
+  --flatten='bindings[].members' \
+  --filter='bindings.members:serviceAccount:<account_id>@<project>.iam.gserviceaccount.com' \
+  --format='table(bindings.role)'
+gcloud iam service-accounts keys list \
+  --iam-account=<account_id>@<project>.iam.gserviceaccount.com --managed-by=user
+```
+
+The account should end up with the writer role on its own tier buckets
+and nothing else: no role on the project, which would reach every bucket
+in it, and no other role on any bucket (`roles/storage.objectAdmin` and
+the `legacy` bucket roles can delete). Note any you find, and any key you
+don't recognise; they are removed in step 5. The project policy needs a
+project owner to read it: the Terraform service account can't.
+
 ## 2. Import
 
 ```hcl
@@ -71,7 +93,25 @@ After applying, remove anything the old implementation left that the new
 one doesn't use (an old script name, an old environment file), then run
 one backup by hand and a restore test before leaving it to the timer.
 
-## 5. The old bucket
+## 5. Remove what the old setup granted
+
+As a project owner, remove every grant found in step 1 other than the
+writer role on the host's own tier buckets, and delete every key other
+than the one the host now uses:
+
+```bash
+gcloud projects remove-iam-policy-binding <project> \
+  --member=serviceAccount:<account_id>@<project>.iam.gserviceaccount.com --role=<old role>
+gcloud iam service-accounts keys delete <key id> \
+  --iam-account=<account_id>@<project>.iam.gserviceaccount.com
+```
+
+Then repeat the read-back commands from step 1 and check the account
+holds the writer role on its tier buckets, one key, and nothing else.
+Until it does, a compromised host may still be able to delete its
+backups.
+
+## 6. The old bucket
 
 Remove the host's write access to it:
 

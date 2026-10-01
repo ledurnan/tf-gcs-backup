@@ -1,0 +1,19 @@
+#!/bin/bash
+# Fake gcloud for bootstrap.bats: logs every call and answers the reads.
+#   FAKE_LOG                    every call is appended here
+#   FAKE_EXISTING               which of "role sa bucket" already exist
+#   FAKE_BUCKET_PROJECT_NUMBER  project number the bucket reports (default 111)
+# The project being bootstrapped always has project number 111.
+set -eu
+echo "$*" >>"$FAKE_LOG"
+has() { [[ " ${FAKE_EXISTING:-} " == *" $1 "* ]]; }
+case " $* " in
+  *" iam roles describe "*) has role ;;
+  *" iam service-accounts describe "*) has sa ;;
+  *" storage buckets describe "*)
+    has bucket || exit 1
+    echo "${FAKE_BUCKET_PROJECT_NUMBER-111}" ;;
+  *" storage buckets get-iam-policy "*) echo "roles/storage.legacyBucketOwner projectOwner:example" ;;
+  *" projects describe "*) echo 111 ;;
+  *) ;;
+esac

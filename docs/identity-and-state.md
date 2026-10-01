@@ -36,14 +36,27 @@ scripts/bootstrap-project ... --apply                                  # runs it
 
 It creates, if missing: the APIs impersonation needs; a custom role for
 Terraform that can manage buckets, custom roles and service accounts but
-**can't delete any of them, can't read or write objects in backup
-buckets, and can't create keys**; the Terraform service account; a
+**has no permission to delete any of them, to read or write objects in
+backup buckets, or to create keys**; the Terraform service account; a
 versioned state bucket, which that account can use; and permission for
 the operator to impersonate it. Re-running is safe.
 
-Because Terraform can't delete buckets or service accounts, removing a
-backup target is a deliberate manual step by a project owner, which is
-the point.
+Because the role holds no delete permission, a `terraform destroy` or a
+plan that replaces a bucket fails, and removing a backup target is a
+deliberate manual step by a project owner, which is the point.
+
+This guards against accidents. It is not a limit on the person running
+Terraform: the role has to manage the writer role and its binding, so it
+can change custom roles and bucket IAM in the project, and someone
+holding it could grant themselves the permissions it lacks. Only give
+impersonation of the Terraform service account to people you would trust
+with the project's IAM.
+
+Bucket names are shared by every Google Cloud project, so
+`--state-bucket` may name a bucket that already exists somewhere else.
+The script uses an existing bucket only if it is in this project, and
+stops otherwise. A name with a suffix nobody could guess (for example
+`your-project-tfstate-7f3a`) avoids the collision.
 
 ## State
 

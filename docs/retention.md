@@ -30,6 +30,16 @@ tier, junk from a compromised host. The size guard
 (`offsite_backup_max_size`) catches the first. The
 [threat model](threat-model.md) covers the second (T5, C22).
 
+A host whose key is misused can write objects under any name, but it
+can't choose how long they stay: every object in a tier's bucket falls
+under that bucket's retention policy and expiry rule, whatever its name.
+It can't delete or shorten anything either. After an incident on a host,
+look at what is in its buckets (`gcloud storage ls -l`) before assuming
+only backups are there. In an unlocked tier, junk can be cleared
+([`emergency.md`](emergency.md)); in a locked one it stays until it
+expires. Buckets written by v0.1, where the host did set each object's
+retention, may hold objects kept longer than their tier.
+
 ## Personal data
 
 If a host holds personal data, its longest tier is how long that data
