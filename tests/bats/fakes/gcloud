@@ -2,7 +2,8 @@
 # Fake gcloud for the bats tests. A directory stands in for the bucket.
 #   FAKE_GCS_DIR          directory holding uploaded objects
 #   FAKE_GCS_LOG          every call is appended here
-#   FAKE_BUCKET_JSON      file returned by `storage buckets describe`
+#   FAKE_BUCKETS_DIR      <bucket>.json here is returned by
+#                         `storage buckets describe gs://<bucket>`
 #   FAKE_REMOTE_SIZE      if set, `objects describe` reports this size
 #   FAKE_GCLOUD_ACCOUNTS  file listing the accounts `auth list` reports
 # An object's creation time is its file's modification time.
@@ -11,7 +12,8 @@ echo "gcloud $*" >>"$FAKE_GCS_LOG"
 case "$1 $2 $3" in
   "storage buckets describe")
     [ -n "${FAKE_BUCKET_DESCRIBE_FAIL:-}" ] && exit 1
-    cat "$FAKE_BUCKET_JSON" ;;
+    bucket="${4#gs://}"
+    cat "$FAKE_BUCKETS_DIR/${bucket%/}.json" ;;
   "storage cp "*)
     src="$3" dst="$4"
     if [[ "$src" == gs://* ]]; then

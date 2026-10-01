@@ -1,7 +1,9 @@
 # {{ ansible_managed }}
-BUCKET={{ offsite_backup_bucket | quote }}
+BUCKET_PREFIX={{ offsite_backup_bucket_name_prefix | quote }}
 PREFIX={{ offsite_backup_prefix | quote }}
-RETENTION_MODE={{ offsite_backup_retention_mode | quote }}
 LIFECYCLE_SLACK_DAYS={{ offsite_backup_lifecycle_slack_days | int }}
 WORK_DIR={{ offsite_backup_work_dir | quote }}
 STATE_DIR={{ offsite_backup_state_dir | quote }}
+MAX_SIZE={{ offsite_backup_max_size | string | quote }}
+MAX_GROWTH_PERCENT={{ offsite_backup_max_growth_percent | int }}
+GROWTH_MIN_SIZE={{ offsite_backup_growth_min_size | string | quote }}

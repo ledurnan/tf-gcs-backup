@@ -1,0 +1,3 @@
+# Copy to .tf-identity (git-ignored). See scripts/tf-with-identity.
+ACCOUNT=you@example.com
+SERVICE_ACCOUNT=tf-gcs-backup@your-project-id.iam.gserviceaccount.com

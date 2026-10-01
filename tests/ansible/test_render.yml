@@ -34,6 +34,7 @@
         - "{{ offsite_backup_conf_dir }}"
         - "{{ scratch.path }}/data"
         - "{{ scratch.path }}/gcs"
+        - "{{ scratch.path }}/buckets"
 
     - name: Add a file to back up
       ansible.builtin.copy:
@@ -54,18 +55,19 @@
         dest: "{{ offsite_backup_conf_dir }}/pre-backup"
         mode: "0700"
 
-    - name: Write the fake bucket's expiry rules to match the tiers
+    # Each tier's bucket keeps objects retain_days and expires them at
+    # retain_days too, leaving no room for the rendered slack.
+    - name: Write each fake tier bucket's retention and expiry
       ansible.builtin.copy:
-        dest: "{{ scratch.path }}/bucket.json"
+        dest: "{{ scratch.path }}/buckets/{{ offsite_backup_bucket_name_prefix }}-{{ item.name }}.json"
         mode: "0600"
         content: >-
-          {{ {'lifecycle_config': {'rule': rules}} | to_json }}
-      vars:
-        rules: >-
-          {{ offsite_backup_tiers | map(attribute='name')
-             | zip(offsite_backup_tiers | map(attribute='retain_days'))
-             | map('join', ':') | map('regex_replace', '^(.*):(.*)$', '{"action":{"type":"Delete"},"condition":{"matchesPrefix":["\1/"],"age":\2}}')
-             | map('from_json') | list }}
+          {{ {'retention_policy': {'retentionPeriod': (item.retain_days * 86400) | string},
+              'lifecycle_config': {'rule': [{'action': {'type': 'Delete'},
+                                             'condition': {'age': item.retain_days}}]}} | to_json }}
+      loop: "{{ offsite_backup_tiers }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     # Ages are retain_days, so the rendered slack (1) makes the contract
     # fail: this proves the script reads the rendered slack.
@@ -77,7 +79,7 @@
         OFFSITE_BACKUP_NOW: "1780272000"
         FAKE_GCS_DIR: "{{ scratch.path }}/gcs"
         FAKE_GCS_LOG: "{{ scratch.path }}/gcloud.log"
-        FAKE_BUCKET_JSON: "{{ scratch.path }}/bucket.json"
+        FAKE_BUCKETS_DIR: "{{ scratch.path }}/buckets"
       register: contract_broken
       changed_when: false
       failed_when: contract_broken.rc == 0
@@ -102,9 +104,9 @@
     - name: Assert every due tier was uploaded, including the custom format
       ansible.builtin.assert:
         that:
-          - uploaded.files | map(attribute='path') | select('search', 'daily/host-a/2026-06-01.tar.age$') | list | length == 1
-          - uploaded.files | map(attribute='path') | select('search', 'weekly/host-a/2026-W23.tar.age$') | list | length == 1
-          - uploaded.files | map(attribute='path') | select('search', 'hourly/host-a/20260601T00.tar.age$') | list | length == 1
+          - uploaded.files | map(attribute='path') | select('search', '/example-host-backup-daily/host-a/2026-06-01.tar.age$') | list | length == 1
+          - uploaded.files | map(attribute='path') | select('search', '/example-host-backup-weekly/host-a/2026-W23.tar.age$') | list | length == 1
+          - uploaded.files | map(attribute='path') | select('search', '/example-host-backup-hourly/host-a/20260601T00.tar.age$') | list | length == 1
         quiet: true
 
     - name: Remove the scratch area

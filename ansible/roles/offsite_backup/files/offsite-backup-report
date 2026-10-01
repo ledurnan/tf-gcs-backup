@@ -7,7 +7,9 @@
 # which the backup script itself can't promise. So a failure alerts, and
 # a run that never happens alerts on silence at the receiving end.
 #
-# Body: {"status":"ok"} or {"status":"failed","detail":"..."}.
+# Body: {"status":"ok","bytes":N} or {"status":"failed","detail":"..."}.
+# bytes is the encrypted archive's size, so the receiving end can chart
+# growth. It's left out if the backup script didn't record one.
 #
 # Never fails the unit: many heartbeat services answer 200 even to a wrong
 # URL, so the receiving end, not this exit code, proves a report arrived.
@@ -20,7 +22,7 @@ LAST_ERROR="$STATE_DIR/last-error"
 [[ -n "${REPORT_URL:-}" ]] || exit 0
 
 if [[ "${SERVICE_RESULT:-}" == success ]]; then
-  set -- ok
+  set -- ok "" "$(cat "$STATE_DIR/last-size" 2>/dev/null || true)"
 else
   # die() in the backup script leaves its message here. A failure it
   # didn't anticipate (set -e, a timeout, a kill) leaves none, and the
@@ -31,8 +33,10 @@ fi
 
 body="$(python3 -c 'import json, sys
 b = {"status": sys.argv[1]}
-if len(sys.argv) > 2:
+if len(sys.argv) > 2 and sys.argv[2]:
     b["detail"] = sys.argv[2][:2000]
+if len(sys.argv) > 3 and sys.argv[3].isdigit():
+    b["bytes"] = int(sys.argv[3])
 print(json.dumps(b, separators=(",", ":")))' "$@")" || exit 0
 
 # The URL is a credential: it goes to curl on stdin, never as an

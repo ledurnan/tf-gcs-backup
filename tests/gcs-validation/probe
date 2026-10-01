@@ -1,0 +1,337 @@
+#!/bin/bash
+#
+# probe: check v0.2's assumptions about Google Cloud against real buckets
+# created by ./v01 and ./v02. See README.md for the order to run things in.
+#
+# Usage: probe <step>
+#   plan-check <plan.json>  the v0.1 -> v0.2 upgrade plan does what
+#                           docs/upgrading-to-v0.2.md says
+#   grant                   let ACCOUNT impersonate both writer service
+#                           accounts (run once, as a project owner)
+#   host                    run the real backup script as the writer,
+#                           then restore-test as the operator
+#   writer                  what the writer must not be able to do
+#   locked                  the locked tier, as the operator
+#   unlocked                the unlocked tier, as the operator
+#   emergency               the emergency principal (ADR 0008): can clear
+#                           the unlocked tier, nothing else
+#   liens                   list the project's liens
+#   cleanup                 delete everything the validation created
+#
+# Reads ../validation.tfvars (project, name_prefix) and .tf-identity
+# (ACCOUNT) from this directory. Each step logs to .logs/.
+#
+# Every check is one of:
+#   PASS        the outcome the design relies on
+#   FAIL        the opposite: the design's assumption is wrong
+#   UNEXPECTED  the command failed for some other reason (a gcloud flag,
+#               a typo, a missing object); read the log
+# Exit status is non-zero if any check is FAIL or UNEXPECTED.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+
+tfvar() {
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\(.*\)\".*/\1/p" "$HERE/validation.tfvars" | head -n1
+}
+
+[ -f "$HERE/validation.tfvars" ] || { echo "copy validation.tfvars.example to validation.tfvars first" >&2; exit 2; }
+[ -f "$HERE/.tf-identity" ] || { echo "copy .tf-identity.example to .tf-identity first" >&2; exit 2; }
+
+PROJECT="$(tfvar project)"
+P="$(tfvar name_prefix)"
+ACCOUNT="$(sed -n 's/^ACCOUNT=//p' "$HERE/.tf-identity")"
+SA_PREFIX="tfgcsb"
+VAL_WRITER="${SA_PREFIX}-val@${PROJECT}.iam.gserviceaccount.com"
+UPG_WRITER="${SA_PREFIX}-upg@${PROJECT}.iam.gserviceaccount.com"
+EMERGENCY="${SA_PREFIX}-emg@${PROJECT}.iam.gserviceaccount.com"
+DAILY="${P}-val-daily"
+LOCKED="${P}-val-locked"
+OLD="${P}-upg"
+OBJ_PREFIX="validation"
+
+for v in PROJECT P ACCOUNT; do
+  [ -n "${!v}" ] || { echo "$v is empty: check validation.tfvars and .tf-identity" >&2; exit 2; }
+done
+
+mkdir -p "$HERE/.logs"
+STEP="${1:-}"
+LOG="$HERE/.logs/${STEP:-none}-$(date -u +%Y%m%dT%H%M%SZ).log"
+FAILED=0
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+# gcloud as the operator (ACCOUNT), or as a writer by impersonation.
+op() { gcloud --account="$ACCOUNT" "$@"; }
+as_writer() { local sa="$1"; shift; gcloud --account="$ACCOUNT" --impersonate-service-account="$sa" "$@"; }
+
+record() { printf '%-11s %s\n' "$1" "$2" | tee -a "$LOG"; }
+
+# run_check <expect: ok|denied> <description> <command...>
+# "denied" means GCS refused it for permissions or retention, not that
+# the command failed for any reason at all.
+run_check() {
+  local expect="$1" desc="$2" out rc
+  shift 2
+  { echo; echo "### $desc"; echo "\$ $*"; } >>"$LOG"
+  out="$("$@" 2>&1)"
+  rc=$?
+  echo "$out" >>"$LOG"
+  echo "rc=$rc" >>"$LOG"
+  if [ "$expect" = ok ]; then
+    if [ "$rc" -eq 0 ]; then record PASS "$desc"; else record UNEXPECTED "$desc (failed; see log)"; FAILED=1; fi
+  else
+    if [ "$rc" -eq 0 ]; then
+      record FAIL "$desc (it was allowed)"; FAILED=1
+    elif grep -qiE '403|forbidden|permission|denied|does not have|retention|locked|412|not allowed|cannot be (deleted|modified)' <<<"$out"; then
+      record PASS "$desc (refused)"
+    else
+      record UNEXPECTED "$desc (failed, but not as a refusal; see log)"; FAILED=1
+    fi
+  fi
+}
+
+# run_retained <description> <command...>: GCS must refuse it *because of
+# retention*, not for some other reason such as a missing permission.
+run_retained() {
+  local desc="$1" out rc
+  shift
+  { echo; echo "### $desc"; echo "\$ $*"; } >>"$LOG"
+  out="$("$@" 2>&1)"
+  rc=$?
+  echo "$out" >>"$LOG"
+  echo "rc=$rc" >>"$LOG"
+  if [ "$rc" -eq 0 ]; then
+    record FAIL "$desc (it was allowed)"; FAILED=1
+  elif grep -qi "subject to bucket's retention policy" <<<"$out"; then
+    record PASS "$desc (refused: retention)"
+  else
+    record UNEXPECTED "$desc (refused, but not for retention; see log)"; FAILED=1
+  fi
+}
+
+newest_object() {
+  op storage ls "gs://$1/${OBJ_PREFIX}/" 2>/dev/null | sort | tail -n1
+}
+
+finish() {
+  echo
+  echo "log: $LOG"
+  [ "$FAILED" -eq 0 ] && echo "all checks passed" || echo "SOME CHECKS DID NOT PASS: read the log"
+  exit "$FAILED"
+}
+
+case "$STEP" in
+plan-check)
+  plan="${2:?usage: probe plan-check <plan.json>}"
+  python3 - "$plan" <<'PY' | tee -a "$LOG"
+import json, sys
+plan = json.load(open(sys.argv[1]))
+changes = {c["address"]: c["change"]["actions"] for c in plan.get("resource_changes", [])}
+want = {
+    'module.upgraded.google_storage_bucket.tier["daily"]': ["create"],
+    'module.upgraded.google_storage_bucket_iam_member.writer["daily"]': ["create"],
+    'module.upgraded.google_storage_bucket_iam_member.writer': ["delete"],
+    'module.upgraded.google_storage_bucket.this': ["forget"],
+    'module.writer_role.google_project_iam_custom_role.writer': ["update"],
+}
+failed = False
+for addr, actions in want.items():
+    got = changes.get(addr)
+    ok = got == actions
+    failed |= not ok
+    print(f"{'PASS' if ok else 'FAIL':<11} {addr}: expected {actions}, plan has {got}")
+for addr, actions in changes.items():
+    if addr.startswith("module.upgraded.google_service_account."):
+        ok = actions in (["no-op"], ["update"])
+        failed |= not ok
+        print(f"{'PASS' if ok else 'FAIL':<11} {addr}: kept ({actions})")
+    if "delete" in actions and addr not in want:
+        failed = True
+        print(f"FAIL        {addr}: unexpected {actions}")
+role = next((c for c in plan["resource_changes"] if c["address"] == "module.writer_role.google_project_iam_custom_role.writer"), None)
+if role:
+    after = set(role["change"]["after"]["permissions"])
+    ok = "storage.objects.setRetention" not in after
+    failed |= not ok
+    print(f"{'PASS' if ok else 'FAIL':<11} writer role drops setRetention: {sorted(after)}")
+sys.exit(1 if failed else 0)
+PY
+  [ "${PIPESTATUS[0]}" -eq 0 ] || FAILED=1
+  finish
+  ;;
+
+grant)
+  for sa in "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY"; do
+    run_check ok "let $ACCOUNT impersonate $sa" \
+      op iam service-accounts add-iam-policy-binding "$sa" --project="$PROJECT" \
+      --member="user:$ACCOUNT" --role=roles/iam.serviceAccountTokenCreator --condition=None
+  done
+  finish
+  ;;
+
+host)
+  conf="$SCRATCH/conf"
+  mkdir -p "$conf" "$SCRATCH/data" "$SCRATCH/state"
+  echo "validation $(date -u +%FT%TZ)" >"$SCRATCH/data/hello.txt"
+  age-keygen -o "$SCRATCH/operator.key" 2>/dev/null
+  age-keygen -y "$SCRATCH/operator.key" >"$conf/recipients"
+  cat >"$conf/backup.conf" <<EOF
+BUCKET_PREFIX=${P}-val
+PREFIX=${OBJ_PREFIX}
+LIFECYCLE_SLACK_DAYS=1
+WORK_DIR=$SCRATCH/work
+STATE_DIR=$SCRATCH/state
+MAX_SIZE=10M
+MAX_GROWTH_PERCENT=100
+GROWTH_MIN_SIZE=64M
+EOF
+  # Timestamped names: a retained object can't be overwritten, so a second
+  # run on the same day needs a new name.
+  printf '%s\n' "daily 1 always %Y-%m-%dT%H%M%S" "locked 1 always %Y-%m-%dT%H%M%S" >"$conf/tiers"
+  echo "$SCRATCH/data" >"$conf/paths"
+
+  gcloud_config="$(gcloud info --format='value(config.paths.global_config_dir)')"
+  as_host() {
+    env OFFSITE_BACKUP_CONF_DIR="$conf" CLOUDSDK_CONFIG="$gcloud_config" \
+      CLOUDSDK_CORE_ACCOUNT="$ACCOUNT" CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT="$VAL_WRITER" \
+      "$ROOT/ansible/roles/offsite_backup/files/offsite-backup" "$@"
+  }
+  run_check ok "tier contract holds against the real buckets (describe format)" as_host --check-contract
+  run_check ok "a real backup run uploads to both tiers and reads them back" as_host
+  run_check ok "restore-test, as the operator, decrypts the newest daily backup" \
+    env CLOUDSDK_CORE_ACCOUNT="$ACCOUNT" "$ROOT/scripts/restore-test" \
+    --bucket-prefix "${P}-val" --tier daily --prefix "$OBJ_PREFIX" \
+    --identity "$SCRATCH/operator.key" --expect hello.txt
+
+  # A broken contract must stop the run: change the host's view of a tier.
+  printf '%s\n' "daily 2 always" "locked 1 always" >"$conf/tiers"
+  desc="a tier that disagrees with its bucket is refused"
+  { echo; echo "### $desc"; } >>"$LOG"
+  if as_host --check-contract >>"$LOG" 2>&1; then
+    record FAIL "$desc (it was accepted)"; FAILED=1
+  elif grep -q "keeps objects 1 days, this host expects 2" "$SCRATCH/state/last-error"; then
+    record PASS "$desc"
+  else
+    record UNEXPECTED "$desc (failed for another reason; see log)"; FAILED=1
+  fi
+  cat "$SCRATCH/state/last-error" >>"$LOG" 2>/dev/null
+  finish
+  ;;
+
+writer)
+  obj="$(newest_object "$DAILY")"
+  [ -n "$obj" ] || { echo "no object in gs://$DAILY/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
+  echo "probe" >"$SCRATCH/probe.txt"
+  until="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)"
+  # shellcheck disable=SC2317  # called through run_check
+  W() { as_writer "$VAL_WRITER" "$@"; }
+
+  run_check ok "writer can read its own object back" W storage objects describe "$obj"
+  run_check denied "writer can't delete an object" W storage rm "$obj"
+  run_check denied "writer can't overwrite an object" W storage cp "$SCRATCH/probe.txt" "$obj"
+  run_check denied "writer can't set retention on an object it wrote" \
+    W storage objects update "$obj" --retain-until="$until" --retention-mode=Locked
+  run_check denied "writer can't put a temporary hold on an object" W storage objects update "$obj" --temporary-hold
+  run_check denied "writer can't upload a new object with its own retention" \
+    W storage cp "$SCRATCH/probe.txt" "gs://$DAILY/probe/retained.txt" --retain-until="$until" --retention-mode=Locked
+  run_check denied "writer can't change the bucket's retention policy" W storage buckets update "gs://$DAILY" --clear-retention-period
+  run_check denied "writer can't read the bucket's IAM policy" W storage buckets get-iam-policy "gs://$DAILY"
+  run_check ok "writer CAN write outside its prefix (expected: it still expires)" \
+    W storage cp "$SCRATCH/probe.txt" "gs://$DAILY/elsewhere/probe.txt"
+  run_check ok "...and that object is under the bucket's retention like any other" \
+    bash -c "gcloud --account='$ACCOUNT' storage objects describe 'gs://$DAILY/elsewhere/probe.txt' --format=json | grep -qi retention"
+  run_check denied "after the upgrade, the old host's writer can't write to its v0.1 bucket" \
+    as_writer "$UPG_WRITER" storage cp "$SCRATCH/probe.txt" "gs://$OLD/daily/probe.txt"
+  run_check denied "one host's writer can't list another host's bucket" \
+    as_writer "$UPG_WRITER" storage ls "gs://$DAILY/"
+  finish
+  ;;
+
+locked)
+  obj="$(newest_object "$LOCKED")"
+  [ -n "$obj" ] || { echo "no object in gs://$LOCKED/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
+  run_check ok "the locked tier reports a locked policy" \
+    bash -c "gcloud --account='$ACCOUNT' storage buckets describe 'gs://$LOCKED' --format=json | python3 -c 'import json,sys; b=json.load(sys.stdin); p=b.get(\"retention_policy\") or b.get(\"retentionPolicy\") or {}; sys.exit(0 if p.get(\"isLocked\", p.get(\"is_locked\")) in (True,\"true\",\"True\") else 1)'"
+  run_retained "operator can't delete an object in the locked tier" op storage rm "$obj"
+  run_check denied "operator can't remove the locked policy" op storage buckets update "gs://$LOCKED" --clear-retention-period
+  run_check denied "operator can't shorten the locked policy" op storage buckets update "gs://$LOCKED" --retention-period=1s
+  finish
+  ;;
+
+unlocked)
+  obj="$(newest_object "$DAILY")"
+  [ -n "$obj" ] || { echo "no object in gs://$DAILY/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
+  run_retained "operator can't delete a retained object while the policy stands" op storage rm "$obj"
+  run_check ok "operator CAN remove the unlocked policy" op storage buckets update "gs://$DAILY" --clear-retention-period
+  run_check ok "...and then delete the object" op storage rm "$obj"
+  echo "note: gs://$DAILY now has no retention policy; 'tf-with-identity apply' in v02 restores it" | tee -a "$LOG"
+  finish
+  ;;
+
+emergency)
+  # A fresh object in the unlocked tier, written by the host's writer, so
+  # it is inside its retention whatever ran before.
+  echo "junk $(date -u +%FT%TZ)" >"$SCRATCH/junk.txt"
+  junk="gs://$DAILY/junk/$(date -u +%Y%m%dT%H%M%S).txt"
+  run_check ok "writer uploads an object to the unlocked tier" as_writer "$VAL_WRITER" storage cp "$SCRATCH/junk.txt" "$junk"
+  locked_obj="$(newest_object "$LOCKED")"
+  # shellcheck disable=SC2317  # called through run_check
+  E() { as_writer "$EMERGENCY" "$@"; }
+
+  run_check ok "emergency can list the unlocked tier" E storage ls "gs://$DAILY/"
+  run_retained "emergency can't delete while the policy stands" E storage rm "$junk"
+  run_check denied "emergency can't add objects" E storage cp "$SCRATCH/junk.txt" "gs://$DAILY/junk/emergency.txt"
+  run_check denied "emergency can't read the bucket's IAM policy" E storage buckets get-iam-policy "gs://$DAILY"
+  run_check denied "emergency can't grant itself anything" \
+    E storage buckets add-iam-policy-binding "gs://$DAILY" --member="serviceAccount:$EMERGENCY" --role=roles/storage.admin
+  run_check denied "emergency has no access to the locked tier" E storage ls "gs://$LOCKED/"
+  if [ -n "$locked_obj" ]; then
+    run_check denied "emergency can't delete from the locked tier (no access at all)" E storage rm "$locked_obj"
+  fi
+  run_check ok "emergency CAN remove the unlocked tier's policy" E storage buckets update "gs://$DAILY" --clear-retention-period
+  run_check ok "...and then delete the object" E storage rm "$junk"
+  echo "note: gs://$DAILY now has no retention policy; 'tf-with-identity apply' in v02 restores it" | tee -a "$LOG"
+  finish
+  ;;
+
+liens)
+  { echo "### liens on $PROJECT"; } >>"$LOG"
+  op alpha resource-manager liens list --project="$PROJECT" 2>&1 | tee -a "$LOG"
+  echo "log: $LOG"
+  ;;
+
+cleanup)
+  echo "Deletes the validation's buckets, service accounts and role in $PROJECT:"
+  buckets=("$DAILY" "$LOCKED" "${P}-upg-daily" "$OLD")
+  printf '  gs://%s\n' "${buckets[@]}"
+  printf '  %s\n' "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY" \
+    "projects/$PROJECT/roles/tfgcsbValidationWriter" "projects/$PROJECT/roles/tfgcsbValidationEmergency"
+  read -r -p "Type the project ID to continue: " answer
+  [ "$answer" = "$PROJECT" ] || { echo "aborted"; exit 1; }
+  for b in "${buckets[@]}"; do
+    labels="$(op storage buckets describe "gs://$b" --format='value(labels)' 2>/dev/null || true)"
+    if [[ "$labels" != *tf-gcs-backup-validation* ]]; then
+      record SKIPPED "gs://$b: missing, or not labelled purpose=tf-gcs-backup-validation"
+      continue
+    fi
+    run_check ok "empty gs://$b" bash -c "gcloud --account='$ACCOUNT' storage rm -r 'gs://$b/**' 2>&1 | grep -v 'One or more URLs matched no objects' || true"
+    run_check ok "delete gs://$b" op storage buckets delete "gs://$b"
+  done
+  for sa in "$VAL_WRITER" "$UPG_WRITER" "$EMERGENCY"; do
+    run_check ok "delete $sa" op iam service-accounts delete "$sa" --project="$PROJECT" --quiet
+  done
+  for role in tfgcsbValidationWriter tfgcsbValidationEmergency; do
+    run_check ok "delete the $role role" op iam roles delete "$role" --project="$PROJECT" --quiet
+  done
+  echo "Then remove the local state: rm -rf $HERE/.state" | tee -a "$LOG"
+  finish
+  ;;
+
+*)
+  sed -n '2,27p' "$0"
+  exit 2
+  ;;
+esac

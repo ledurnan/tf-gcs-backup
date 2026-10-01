@@ -1,6 +1,8 @@
 # 0001: One bucket per backed-up host
 
-- Status: Proposed
+- Status: Proposed. Amended by [0007](0007-bucket-retention-policy-per-tier.md):
+  each host now has one bucket per tier. The per-host isolation below is
+  unchanged.
 
 ## Context
 

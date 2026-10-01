@@ -11,21 +11,26 @@ You need:
 
 ## 1. Find the object
 
+Each tier is its own bucket, `<bucket name prefix>-<tier>`:
+
 ```bash
-gcloud storage ls -l gs://<bucket>/<tier>/<prefix>/
+gcloud storage ls -l gs://<bucket name prefix>-<tier>/<prefix>/
 ```
 
-Object names are dated within each tier (`daily/<prefix>/2026-06-03.tar.age`,
-`weekly/<prefix>/2026-W23.tar.age`, `monthly/<prefix>/2026-06.tar.age` by
-default). Go by the creation time in the second column, not by the name:
-the host chooses the names, and a host that was compromised could have
-left an object whose name sorts last.
+Object names are dated (`<prefix>/2026-06-03.tar.age` daily,
+`<prefix>/2026-W23.tar.age` weekly, `<prefix>/2026-06.tar.age` monthly,
+by default). Go by the creation time in the second column, not by the
+name: the host chooses the names, and a host that was compromised could
+have left an object whose name sorts last.
+
+Backups written by v0.1 are in a single bucket, under
+`gs://<bucket>/<tier>/<prefix>/`, until they expire.
 
 ## 2. Fetch and decrypt, into a scratch directory
 
 ```bash
 mkdir -p restore
-gcloud storage cp gs://<bucket>/daily/<prefix>/2026-06-03.tar.age .
+gcloud storage cp gs://<bucket name prefix>-daily/<prefix>/2026-06-03.tar.age .
 age -d -i operator.key 2026-06-03.tar.age | tar -xz -C ./restore
 ```
 
@@ -45,7 +50,7 @@ application keeps.
 ## Proving it before you need it
 
 ```bash
-scripts/restore-test --bucket <bucket> --prefix <prefix> --tier daily \
+scripts/restore-test --bucket-prefix <bucket name prefix> --prefix <prefix> --tier daily \
   --identity operator.key \
   --expect offsite-backup-dump/ --expect etc/letsencrypt/ \
   --max-age 26 --report-url-file restore-test.url
@@ -53,9 +58,10 @@ scripts/restore-test --bucket <bucket> --prefix <prefix> --tier daily \
 
 It fetches the most recently created backup, decrypts it, lists it,
 checks each `--expect` entry is present, and reports the result to the
-heartbeat URL. It extracts nothing. `--max-age` (in hours) fails the test
-when the newest backup is older than the tier's schedule allows, so
-backups that have stopped don't pass on an old object.
+heartbeat URL. It extracts nothing. For a v0.1 bucket, pass
+`--bucket <bucket>` instead of `--bucket-prefix`. `--max-age` (in hours)
+fails the test when the newest backup is older than the tier's schedule
+allows, so backups that have stopped don't pass on an old object.
 
 The heartbeat URL is a credential: anyone who has it can report "ok". So
 it is read from a file (its first line), never given as an argument,

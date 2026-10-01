@@ -162,14 +162,17 @@
 
     # Prove now that the credential reaches the bucket and that the tier
     # contract holds, rather than finding out from the first failed run.
-    - name: Verify the credential can reach the bucket
-      ansible.builtin.command: gcloud storage ls gs://{{ offsite_backup_bucket }}/
+    - name: Verify the credential can reach each tier's bucket
+      ansible.builtin.command: gcloud storage ls gs://{{ offsite_backup_bucket_name_prefix }}-{{ item.name }}/
       environment:
         CLOUDSDK_CONFIG: "{{ offsite_backup_state_dir }}/gcloud"
       changed_when: false
       when: not ansible_check_mode
+      loop: "{{ offsite_backup_tiers }}"
+      loop_control:
+        label: "{{ item.name }}"
 
-    - name: Verify the tier contract against the bucket
+    - name: Verify the tier contract against the buckets
       ansible.builtin.command: "{{ offsite_backup_bin_dir }}/offsite-backup --check-contract"
       environment:
         OFFSITE_BACKUP_CONF_DIR: "{{ offsite_backup_conf_dir }}"
