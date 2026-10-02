@@ -5,6 +5,7 @@
 #   FAKE_BUCKETS_DIR      <bucket>.json here is returned by
 #                         `storage buckets describe gs://<bucket>`
 #   FAKE_REMOTE_SIZE      if set, `objects describe` reports this size
+#   FAKE_CP_ERROR         if set, uploads fail with this message
 #   FAKE_GCLOUD_ACCOUNTS  file listing the accounts `auth list` reports
 # An object's creation time is its file's modification time.
 set -eu
@@ -20,12 +21,27 @@ case "$1 $2 $3" in
       cp "$FAKE_GCS_DIR/${src#gs://}" "$dst"
     else
       dst="${dst#gs://}"
+      if [ -n "${FAKE_CP_ERROR:-}" ]; then echo "ERROR: $FAKE_CP_ERROR" >&2; exit 1; fi
+      # The writer can't delete, and GCS treats an overwrite as a delete.
+      # This is the message real GCS gives (tests/gcs-validation).
+      if [ -e "$FAKE_GCS_DIR/$dst" ]; then
+        echo "ERROR: [writer@example.iam.gserviceaccount.com] does not have permission to access b instance [${dst%%/*}] (or it may not exist): writer@example.iam.gserviceaccount.com does not have storage.objects.delete access to the Google Cloud Storage object." >&2
+        exit 1
+      fi
       mkdir -p "$FAKE_GCS_DIR/$(dirname "$dst")"
       cp "$src" "$FAKE_GCS_DIR/$dst"
     fi ;;
   "storage objects describe")
     obj="${4#gs://}"
-    if [ -n "${FAKE_REMOTE_SIZE:-}" ]; then echo "$FAKE_REMOTE_SIZE"; else stat -c %s "$FAKE_GCS_DIR/$obj"; fi ;;
+    if [ ! -e "$FAKE_GCS_DIR/$obj" ]; then
+      echo "ERROR: (gcloud.storage.objects.describe) gs://$obj not found: 404." >&2
+      exit 1
+    fi
+    case "$*" in
+      # As real gcloud prints creation_time.date("%s"): epoch seconds, ".0".
+      *creation_time*) echo "$(stat -c %Y "$FAKE_GCS_DIR/$obj").0" ;;
+      *) if [ -n "${FAKE_REMOTE_SIZE:-}" ]; then echo "$FAKE_REMOTE_SIZE"; else stat -c %s "$FAKE_GCS_DIR/$obj"; fi ;;
+    esac ;;
   "storage ls -l")
     prefix="${4#gs://}"
     TZ=UTC find "$FAKE_GCS_DIR/$prefix" -maxdepth 1 -type f \
