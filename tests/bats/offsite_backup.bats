@@ -171,6 +171,52 @@ EOF
   grep -q "verify failed" "$T/state/last-error"
 }
 
+@test "re-run: a second run the same day keeps what is stored and succeeds" {
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  obj="$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age"
+  before="$(sha256sum <"$obj")"
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already stored today"* ]]
+  [ "$(sha256sum <"$obj")" = "$before" ]
+  [ ! -e "$T/state/last-error" ]
+}
+
+@test "re-run: a retry after a part-failed run writes the tiers still missing" {
+  # The daily upload of this run's day happened; weekly and monthly didn't.
+  mkdir -p "$FAKE_GCS_DIR/example-daily/host-a"
+  echo earlier >"$FAKE_GCS_DIR/example-daily/host-a/2026-06-01.tar.age"
+  run_backup "$MONDAY_FIRST"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_GCS_DIR/example-daily/host-a/2026-06-01.tar.age")" = earlier ]
+  [ -f "$FAKE_GCS_DIR/example-weekly/host-a/2026-W23.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-monthly/host-a/2026-06.tar.age" ]
+}
+
+@test "re-run: an object holding the name since before the run's day fails loudly" {
+  mkdir -p "$FAKE_GCS_DIR/example-daily/host-a"
+  echo squatter >"$FAKE_GCS_DIR/example-daily/host-a/2026-06-01.tar.age"
+  touch -d "2026-05-20 12:00 UTC" "$FAKE_GCS_DIR/example-daily/host-a/2026-06-01.tar.age"
+  run_backup "$MONDAY_FIRST"
+  [ "$status" -ne 0 ]
+  grep -q "gs://example-daily/host-a/2026-06-01.tar.age already exists" "$T/state/last-error"
+  grep -q "created 2026-05-20" "$T/state/last-error"
+  run grep -c "storage.objects.delete" "$T/state/last-error"
+  [ "$output" = 0 ]
+  # The other tiers are still written, and the failed run sets no baseline.
+  [ -f "$FAKE_GCS_DIR/example-weekly/host-a/2026-W23.tar.age" ]
+  [ -f "$FAKE_GCS_DIR/example-monthly/host-a/2026-06.tar.age" ]
+  [ ! -e "$T/state/last-size" ]
+}
+
+@test "upload: a failure says why, in gcloud's words, and other tiers are still tried" {
+  FAKE_CP_ERROR="Connection reset by peer" run_backup "$MONDAY_FIRST"
+  [ "$status" -ne 0 ]
+  grep -q "upload of gs://example-daily/host-a/2026-06-01.tar.age failed: .*Connection reset by peer" "$T/state/last-error"
+  grep -q "upload of gs://example-monthly/" "$T/state/last-error"
+}
+
 @test "contract: a tier with no bucket stops the run before any upload" {
   tier_buckets daily:7:8 weekly:35:36
   run_backup "$WEDNESDAY"
