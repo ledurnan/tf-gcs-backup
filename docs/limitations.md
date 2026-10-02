@@ -24,6 +24,13 @@ What it doesn't do, so you can check a host fits before adopting it.
 - **Tier triggers are coarse.** `when` is `always`, one weekday or one
   day of the month (01 to 28). There's no "last day of the month", no
   "every N days" and no list of days.
+- **One object per name.** A stored object can't be overwritten, so a
+  tier keeps one copy per name. With the default names that is one per
+  day, week or month. A second run on the same day keeps the copy already
+  stored and says so. To keep every run, add the time to the tier's
+  `name_format` (for example `%Y-%m-%dT%H%M%SZ`). A `name_format` must
+  give a new name on every day its tier is due: a name stored on an
+  earlier day fails the run.
 
 ## Storage
 
