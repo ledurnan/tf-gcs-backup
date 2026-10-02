@@ -19,7 +19,9 @@ generally don't, and running an OIDC issuer for them is its own project.
 Keys are never created by Terraform. The `backup-target` module outputs
 `key_issue_command`, the one `gcloud` command that issues the key; an
 operator runs it deliberately, stores the key in the consumer's secret
-store, and deletes the file. The Ansible role validates the key's JSON
+store, and deletes the file. For Ansible Vault, `scripts/issue-key` does
+those three steps as one: the plaintext key stays in a private directory
+in RAM, and a failure part-way deletes the new key again. The Ansible role validates the key's JSON
 shape before using it.
 
 ## Consequences

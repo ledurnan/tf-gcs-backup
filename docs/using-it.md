@@ -77,8 +77,37 @@ delete.
 ## 3. Issue the host's key, out of band
 
 Keys never go through Terraform, so they never reach state
-([ADR 0002](adr/0002-keys-out-of-band.md)). The module's
-`key_issue_command` output is the command:
+([ADR 0002](adr/0002-keys-out-of-band.md)).
+
+**With Ansible Vault**, [`scripts/issue-key`](../scripts/issue-key)
+issues the key and writes it straight into a vault file as one step.
+The plaintext key exists only in a private directory in RAM while it
+runs. Run it once without `--apply`: it checks everything and changes
+nothing.
+
+```bash
+scripts/issue-key \
+  --service-account yourorg-backup-host-a@your-project-id.iam.gserviceaccount.com \
+  --account you@example.com \
+  --vault-file inventory/host_vars/host-a/vault.yml \
+  --var vault_offsite_backup_sa_key \
+  --apply
+```
+
+- The vault password is found the way `ansible-vault` finds it: an
+  `ansible.cfg` in the current directory, `ANSIBLE_VAULT_PASSWORD_FILE`,
+  or `--vault-password-file` / `--vault-id`.
+- It refuses to overwrite a key that's already there. `--rotate` replaces
+  it and prints the commands to delete the old key once the host has the
+  new one.
+- If any step after issuing fails, or it is interrupted, it puts the
+  vault back and deletes the new key in Google Cloud. If even that
+  fails, it exits 3 and prints what to delete by hand.
+- `--help` lists every option: the project, a new vault file, the work
+  directory and how ansible-vault is called.
+
+**With another secret store**, the module's `key_issue_command` output is
+the command:
 
 ```bash
 gcloud iam service-accounts keys create ./yourorg-backup-host-a-sa.json \
@@ -86,11 +115,10 @@ gcloud iam service-accounts keys create ./yourorg-backup-host-a-sa.json \
   --project=your-project-id
 ```
 
-Put the file's contents in your secret store (for example Ansible Vault)
-**without opening it in an editor that wraps long lines**, then delete the
-file. Until then it is a live credential sitting in your working
-directory: add `*-sa.json` to your repository's `.gitignore` so it can't
-be committed by accident.
+Put the file's contents in your secret store **without opening it in an
+editor that wraps long lines**, then delete the file. Until then it is a
+live credential sitting in your working directory: add `*-sa.json` to
+your repository's `.gitignore` so it can't be committed by accident.
 
 ## 4. The encryption keys
 
