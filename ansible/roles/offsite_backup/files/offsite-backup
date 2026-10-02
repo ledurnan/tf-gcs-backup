@@ -14,8 +14,9 @@
 #   4. refuse an archive that is larger than the configured ceiling, or
 #      that grew too much since the last good run (the size guard)
 #   5. upload to the bucket of each tier due today, then read each object
-#      back and compare sizes. Retention is the bucket's: the host never
-#      chooses how long anything is kept (ADR 0007)
+#      back and compare sizes. A tier whose object for this period was
+#      already stored today keeps it. Retention is the bucket's: the host
+#      never chooses how long anything is kept (ADR 0007)
 #
 # Usage: offsite-backup [--check-contract]
 #   --check-contract  only run step 1, then exit
@@ -254,25 +255,74 @@ fi
 
 # --- 5. upload ------------------------------------------------------------
 
-upload() {
-  local url="$1" remote_size
+# Each tier is attempted even when another fails, so a retry after a
+# part-failed run still writes the tiers that were missed. Failures are
+# collected and fail the run at the end.
+FAILURES=()
+fail_tier() {
+  log err "$1"
+  FAILURES+=("$1")
+}
 
-  gcloud storage cp "$WORK/backup.tar.age" "$url" \
-    || die "upload of ${url} failed"
+# The first ERROR line gcloud printed, or its last line, kept short: it
+# goes into the run report.
+gcloud_reason() {
+  local reason
+  reason="$(grep -m 1 '^ERROR:' <<<"$1" || tail -n 1 <<<"$1")"
+  reason="${reason#ERROR: }"
+  printf '%s' "${reason:0:300}"
+}
+
+# A retained object can't be overwritten, and the writer can't delete, so
+# an upload to a name that's taken fails. GCS reports that as a missing
+# storage.objects.delete permission, which is true but invites the one
+# fix that must never be made. So when an upload fails, look at the object:
+#   - created on this run's day (UTC): an earlier run today, or a manual
+#     run, already stored this tier's copy for the period. Keep it.
+#   - created before this run's day: nothing that ran today wrote it. The
+#     name was taken in advance, by a name_format that repeats across due
+#     days, or by someone holding a writer key. Fail loudly.
+#   - absent: a real upload failure. Report gcloud's reason.
+RUN_DAY_START="$(date -u -d "$(date -u -d "@$NOW" +%F)" +%s)"
+stored=0
+kept=0
+
+upload() {
+  local url="$1" out remote_size created
+
+  if ! out="$(gcloud storage cp "$WORK/backup.tar.age" "$url" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    if created="$(gcloud storage objects describe "$url" \
+      --format='value(creation_time.date("%s"))' 2>/dev/null)" \
+      && created="${created%%.*}" && [[ "$created" =~ ^[0-9]+$ ]]; then
+      if [ "$created" -ge "$RUN_DAY_START" ]; then
+        log notice "${url} already stored today, at $(date -u -d "@$created" +%H:%M) UTC; kept, not overwritten"
+        kept=$((kept + 1))
+      else
+        fail_tier "${url} already exists, created $(date -u -d "@$created" '+%Y-%m-%d %H:%M') UTC, before this run's day, so no run today wrote it. Nothing was overwritten. If this tier's name_format gives the same name on more than one due day, change it. Otherwise someone with a writer key may have taken the name: see docs/emergency.md. Never grant the writer delete"
+      fi
+      return
+    fi
+    fail_tier "upload of ${url} failed: $(gcloud_reason "$out")"
+    return
+  fi
 
   # Read back. An upload that returns 0 but stored nothing useful is the
   # silent failure this whole design exists to catch.
   remote_size="$(gcloud storage objects describe "$url" \
     --format='value(size)' 2>/dev/null || true)"
-  [ "$remote_size" = "$LOCAL_SIZE" ] \
-    || die "verify failed for ${url}: local ${LOCAL_SIZE} bytes, remote '${remote_size}'"
+  if [ "$remote_size" != "$LOCAL_SIZE" ]; then
+    fail_tier "verify failed for ${url}: local ${LOCAL_SIZE} bytes, remote '${remote_size}'"
+    return
+  fi
 
   log info "stored ${url} (${LOCAL_SIZE} bytes)"
+  stored=$((stored + 1))
 }
 
 DAY_OF_WEEK="$(date -u -d "@$NOW" +%u)"
 DAY_OF_MONTH="$(date -u -d "@$NOW" +%d)"
-uploaded=0
+due_tiers=0
 
 for i in "${!TIER_NAMES[@]}"; do
   case "${TIER_WHEN[$i]}" in
@@ -284,15 +334,20 @@ for i in "${!TIER_NAMES[@]}"; do
 
   stamp="$(date -u -d "@$NOW" +"${TIER_FORMAT[$i]}")"
   upload "gs://$(bucket_for "${TIER_NAMES[$i]}")/${PREFIX}/${stamp}.tar.age"
-  uploaded=$((uploaded + 1))
+  due_tiers=$((due_tiers + 1))
 done
+
+if [ "${#FAILURES[@]}" -gt 0 ]; then
+  summary="$(printf '%s; ' "${FAILURES[@]}")"
+  die "${#FAILURES[@]} of ${due_tiers} due tier(s) failed (${stored} stored, ${kept} already stored today): ${summary%; }"
+fi
 
 # A tier list where nothing is due today is legitimate (say, weekly only),
 # but it means this run protected nothing, so say so.
-if [ "$uploaded" -eq 0 ]; then
+if [ "$due_tiers" -eq 0 ]; then
   log warning "no tier was due today; nothing uploaded"
 else
-  log info "backup complete: ${uploaded} object(s) stored"
+  log info "backup complete: ${stored} object(s) stored, ${kept} already stored today"
 fi
 
 # The baseline for the next run's growth check, and the size the run

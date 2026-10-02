@@ -50,6 +50,7 @@ Cloud's own infrastructure.
 | T8  | Reads its own backup history (data since deleted from the live system).                                                                            |
 | T9  | Poisons backups: uploads plausible but wrong or backdoored archives, which are restored later.                                                     |
 | T10 | The writer key is copied off the host and used from elsewhere, for longer than the host compromise lasts.                                          |
+| T31 | **Name squatting**: uploads objects under the names of future periods, so the real backup for each of those periods can't be written.              |
 
 ### From the cloud side
 
@@ -71,14 +72,15 @@ Cloud's own infrastructure.
 
 ### Operational failure
 
-| ID  | Threat                                                                                                                      |
-| --- | --------------------------------------------------------------------------------------------------------------------------- |
-| T19 | Backups stop silently: the timer is disabled, the host is down, or the script fails without anyone noticing.                |
-| T20 | An upload is corrupt, truncated or empty, and is still treated as a backup.                                                 |
-| T21 | Too little is backed up: a path is missing, a dump is empty, or a table is truncated, and the backup is valid but useless.  |
-| T22 | Too much is backed up (a large directory listed by mistake, or data that grew), and it is billed for every tier's lifetime. |
-| T23 | The host's tiers and the buckets' retention or expiry disagree, so objects expire too early or are kept too long.           |
-| T24 | A mistaken upload to a locked tier (wrong data, or far too much) can't be removed before it expires.                        |
+| ID  | Threat                                                                                                                                                                                                                                                                 |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T19 | Backups stop silently: the timer is disabled, the host is down, or the script fails without anyone noticing.                                                                                                                                                           |
+| T20 | An upload is corrupt, truncated or empty, and is still treated as a backup.                                                                                                                                                                                            |
+| T21 | Too little is backed up: a path is missing, a dump is empty, or a table is truncated, and the backup is valid but useless.                                                                                                                                             |
+| T22 | Too much is backed up (a large directory listed by mistake, or data that grew), and it is billed for every tier's lifetime.                                                                                                                                            |
+| T23 | The host's tiers and the buckets' retention or expiry disagree, so objects expire too early or are kept too long.                                                                                                                                                      |
+| T24 | A mistaken upload to a locked tier (wrong data, or far too much) can't be removed before it expires.                                                                                                                                                                   |
+| T30 | A second run in the same period, or a retry, fails on a name already stored. GCS reports it as a missing `storage.objects.delete` permission, which invites granting the writer delete, and a run that stops at the first failed tier never writes the tiers after it. |
 
 ### Data protection
 
@@ -131,6 +133,7 @@ Cloud's own infrastructure.
 | C33 | The writer role's precondition refuses any permission that deletes, updates, sets retention or IAM, or overrides retention, not only delete.                                                                                                                                                                                                                                                                                     | `modules/project-role/main.tf`                  | T2, T4, T12    |
 | C34 | **Emergency access to unlocked tiers** ([ADR 0008](adr/0008-emergency-access-to-unlocked-tiers.md)). An optional, named principal, never on a host, bound on unlocked tiers only with a role that can remove or shorten the retention policy and delete objects (and read them, which `gcloud` needs; they're encrypted), and nothing else: no adding objects or changing access. [`emergency.md`](emergency.md) is the runbook. | `modules/project-role`, `modules/backup-target` | T5, T24        |
 | C35 | **Each consumer names its own roles** (`role_id_prefix`, required), and by convention its buckets and service accounts too ([ADR 0009](adr/0009-consumers-sharing-a-project.md)).                                                                                                                                                                                                                                                | `modules/project-role`                          | T29            |
+| C36 | **One object per name, checked on failure.** When an upload fails, the host reads the object's creation time. Stored on the run's day: an earlier run wrote it, keep it. Stored earlier: fail, naming the object and its date, and never suggest granting delete. Every due tier is tried, and the run fails at the end if any did.                                                                                              | `offsite-backup`                                | T30, T31       |
 
 ### Proposed
 
@@ -186,6 +189,8 @@ What's left after the in-place controls, and what would reduce it.
 | T27 tampered supply chain           | C17                                     | Medium. The release file is fetched over TLS from GitHub but not verified against a checksum.                                                                                                                                                                                                                                                                                                           | C31           |
 | T28 git install corrupts repo       | C17                                     | Low.                                                                                                                                                                                                                                                                                                                                                                                                    | —             |
 | T29 another consumer in the project | v0.2: C35                               | Low, provided consumers keep to their own prefixes. Nothing technical stops one reusing another's names.                                                                                                                                                                                                                                                                                                | —             |
+| T30 same-period re-run              | v0.2: C36                               | Low. A re-run keeps the stored copy and succeeds; a retry writes only the missing tiers.                                                                                                                                                                                                                                                                                                                | —             |
+| T31 name squatting                  | v0.2: C36                               | Medium. Detected the day each squatted period comes due, and reported, but that period's copy in that tier is lost unless the name is cleared: possible in an unlocked tier ([`emergency.md`](emergency.md)), not in a locked one. Changing the tier's `name_format` sidesteps the squatted names.                                                                                                      | C24, C25, C29 |
 
 ## Keeping this current
 

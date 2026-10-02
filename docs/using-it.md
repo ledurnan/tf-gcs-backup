@@ -168,6 +168,11 @@ scripts/restore-test --bucket-prefix yourorg-backup-host-a --prefix host-a \
   --tier daily --identity operator.key --expect offsite-backup-dump/
 ```
 
+If the timer has already run today, the manual run keeps the copy that
+run stored ("already stored today") rather than writing a second one.
+Each tier is tried even when another fails, so running it again after a
+part-failed run writes only what's missing.
+
 If you set `offsite_backup_report_url`, check the run arrived at the
 heartbeat service too. Many answer `200` even to a wrong URL.
 
