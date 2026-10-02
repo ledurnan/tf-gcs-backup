@@ -64,6 +64,13 @@ shortened or emptied early, by anyone**. Read
 [`docs/retention.md`](docs/retention.md) before setting tiers for a host
 that holds personal data.
 
+## Issuing a host's key
+
+[`scripts/issue-key`](scripts/issue-key) issues a host's writer key and
+writes it straight into an Ansible Vault file, with nothing in plaintext
+on disk. It undoes itself if anything fails
+([`docs/using-it.md`](docs/using-it.md), step 3).
+
 ## Restoring
 
 [`docs/restore.md`](docs/restore.md). Prove it works on a schedule with
