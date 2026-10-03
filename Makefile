@@ -1,4 +1,4 @@
-.PHONY: help test terraform tflint shellcheck bats render ansible-lint
+.PHONY: help test terraform tflint shellcheck ruff bats render ansible-lint
 
 TF_DIRS := modules/project-role modules/backup-target
 BUILD := .build
@@ -6,7 +6,7 @@ BUILD := .build
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
-test: terraform shellcheck bats render ansible-lint ## Everything CI runs except tflint and gitleaks
+test: terraform shellcheck ruff bats render ansible-lint ## Everything CI runs except tflint and gitleaks
 
 terraform: ## Validate and test the modules (mock provider), validate the example
 	@set -e; for d in $(TF_DIRS); do \
@@ -25,7 +25,11 @@ tflint: ## Lint the modules and the example
 	done
 
 shellcheck: ## Lint every shell script
-	shellcheck -x ansible/roles/offsite_backup/files/* scripts/restore-test scripts/bootstrap-project scripts/issue-key scripts/tf-with-identity tests/bats/fakes/* tests/bats/fakes-bootstrap/* tests/gcs-validation/probe
+	shellcheck -x ansible/roles/offsite_backup/files/* scripts/restore-test scripts/bootstrap-project scripts/tf-with-identity tests/bats/fakes/* tests/bats/fakes-bootstrap/* tests/gcs-validation/probe
+
+ruff: ## Lint and format-check the Python scripts (settings in .ruff.toml)
+	ruff check scripts/issue-key
+	ruff format --check scripts/issue-key
 
 bats: ## Script tests and role validation tests
 	bats tests/bats
