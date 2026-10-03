@@ -1,0 +1,14 @@
+# Ruff settings for the Python scripts. Python files here have no .py
+# suffix, so the Makefile names them.
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM", "PL"]
+ignore = [
+  "PLR0912",  # too many branches: checks read best as one list
+  "PLR0915",  # too many statements: likewise
+  "PLR2004",  # magic values in comparisons
+  "PLC0415",  # import inside a function: yaml is imported where the missing-module message can be given
+  "PLW0603",  # global: the signal handler's state
+]
