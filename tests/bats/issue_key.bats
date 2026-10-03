@@ -3,7 +3,8 @@
 # issue-key against a fake gcloud (keys kept in a file) and the real
 # ansible-vault, wrapped so a test can make one of its commands fail.
 # Covers: the dry run, adding and rotating, every refusal, and the undo
-# when a step after issuing the key fails.
+# when a step after issuing the key fails. FAKE_LIST_STALE stands in for
+# Google listing a new key late: the key list is read from that file.
 
 ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 ISSUE="$ROOT/scripts/issue-key"
@@ -27,7 +28,7 @@ case "$*" in
   *"service-accounts describe"*)
     [ -z "${FAKE_SA_MISSING:-}" ] || { echo "NOT_FOUND: no such account" >&2; exit 1; }
     echo "host-a-writer@proj-one.iam.gserviceaccount.com" ;;
-  *"keys list"*) cat "$FAKE_KEYS" ;;
+  *"keys list"*) cat "${FAKE_LIST_STALE:-$FAKE_KEYS}" ;;
   *"keys create"*)
     [ -z "${FAKE_CREATE_FAIL:-}" ] || { echo "PERMISSION_DENIED: keys.create" >&2; exit 1; }
     # The last positional argument is the output file.
@@ -272,6 +273,29 @@ work_is_empty() { [ -z "$(ls -A "$T/work")" ]; }
   rc=0; wait "$pid" || rc=$?
   [ "$rc" -ne 0 ]
   grep -q "interrupted" "$T/out"
+  grep -q "UNDO: deleted the new key" "$T/out"
+  [ ! -s "$FAKE_KEYS" ]
+  [ "$(sha256sum <"$VAULT")" = "$before" ]
+  work_is_empty
+}
+
+@test "issue-key: a new key Google doesn't list yet is found from its file" {
+  FAKE_LIST_STALE=/dev/null issue --apply
+  [ "$status" -eq 0 ]
+  [ "$(key_in_vault private_key_id)" = "$(cat "$FAKE_KEYS")" ]
+}
+
+@test "issue-key: interrupted after issuing a key Google doesn't list yet, it still deletes it" {
+  before="$(sha256sum <"$VAULT")"
+  FAKE_LIST_STALE=/dev/null FAKE_CREATE_SLEEP=3 "$ISSUE" --service-account "$SA" --account op@example.com \
+    --vault-file "$VAULT" --var vault_sa_key --work-dir "$T/work" --allow-disk-work-dir \
+    --apply >"$T/out" 2>&1 &
+  pid=$!
+  for _ in $(seq 100); do [ -e "$FAKE_KEYS.issued" ] && break; sleep 0.1; done
+  [ -e "$FAKE_KEYS.issued" ]
+  kill -TERM "$pid"
+  rc=0; wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ]
   grep -q "UNDO: deleted the new key" "$T/out"
   [ ! -s "$FAKE_KEYS" ]
   [ "$(sha256sum <"$VAULT")" = "$before" ]
