@@ -64,12 +64,26 @@ shortened or emptied early, by anyone**. Read
 [`docs/retention.md`](docs/retention.md) before setting tiers for a host
 that holds personal data.
 
-## Issuing a host's key
+## Issuing keys
 
 [`scripts/issue-key`](scripts/issue-key) issues a host's writer key and
 writes it straight into an Ansible Vault file, with nothing in plaintext
 on disk. It undoes itself if anything fails
 ([`docs/using-it.md`](docs/using-it.md), step 3).
+
+[`scripts/issue-age-key`](scripts/issue-age-key) generates the operator
+or recovery age key, shows the private key once and has you paste it
+back from where you saved it before calling it issued (step 4). What it
+can't guarantee:
+
+- The private key passes through Python strings, which can't be reliably
+  wiped from memory.
+- Its work directory is in RAM, but tmpfs can be written to swap, unless
+  swap is encrypted or the directory is on ramfs (`--work-dir`).
+- It can't tell whether the terminal is being recorded (`script`, tmux
+  `pipe-pane`, or the terminal emulator's own logging).
+- The clipboard is outside its control, and copying the key into a
+  password manager usually goes through it.
 
 ## Restoring
 
