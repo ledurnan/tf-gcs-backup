@@ -1,459 +1,823 @@
-#!/bin/bash
-#
-# issue-key: issue a backed-up host's writer key and put it straight into
-# an Ansible Vault file, without the key ever touching a disk in plaintext.
-#
-# The out-of-band step of ADR 0002, as one command. It:
-#
-#   1. checks everything first: the tools, the Google account, the service
-#      account, its key count, the vault file and its password, and
-#      whether the variable is already set
-#   2. issues a new key into a private directory on a RAM-backed
-#      filesystem (tmpfs), and checks it is a key for that account
-#   3. decrypts the vault there, adds the variable, re-encrypts it, checks
-#      the result decrypts to exactly the old contents plus the new key,
-#      and swaps it in atomically
-#   4. checks the vault on disk once more
-#
-# Any failure after the key is issued undoes the work: the original vault
-# is put back and the new key is deleted in Google Cloud, so no live key is
-# left that nothing holds. If that undo fails too, it says so and prints
-# what to do by hand (exit status 3). Every temporary file is shredded on
-# exit, including on Ctrl-C.
-#
-# The key itself is never printed, logged, passed as an argument, or
-# written outside the private work directory and the encrypted vault.
-#
-# Usage:
-#   issue-key --service-account <email> --account <your email>
-#             --vault-file <path> --var <variable name>
-#             [--project <id>] [--rotate] [--create-vault]
-#             [--vault-password-file <file>] [--vault-id <id>]...
-#             [--encrypt-vault-id <id>] [--ansible-config <file>]
-#             [--work-dir <dir>] [--allow-disk-work-dir] [--apply]
-#
-#   --service-account    the writer service account: the backup-target
-#                        module's service_account_email output
-#   --account            the Google account to act as. Named on every
-#                        gcloud call, so another logged-in account (a work
-#                        one, say) is never used by accident
-#   --vault-file         the Ansible Vault file to hold the key, e.g.
-#                        inventory/host_vars/<host>/vault.yml
-#   --var                the variable to set, e.g. vault_offsite_backup_sa_key
-#   --project            the service account's project. Defaults to the
-#                        one in its email; must match it if given
-#   --rotate             replace the variable if it is already set. The
-#                        old keys are left valid (the host still uses one
-#                        until it is re-deployed) and the commands to
-#                        delete them are printed
-#   --create-vault       create the vault file if it doesn't exist
-#   --vault-password-file, --vault-id, --encrypt-vault-id, --ansible-config
-#                        how ansible-vault finds the password, passed on
-#                        to it. Without them it uses its own defaults:
-#                        ANSIBLE_VAULT_PASSWORD_FILE, or an ansible.cfg in
-#                        the current directory
-#   --work-dir           where the plaintext lives while the script runs.
-#                        Default $XDG_RUNTIME_DIR, else /dev/shm. Must be
-#                        tmpfs or ramfs, so nothing reaches a disk
-#   --allow-disk-work-dir  accept a work directory on a disk
-#   --apply              do it. Without it, every check runs and nothing
-#                        is changed
-#
-# Exit status: 0 done (or a dry run that found nothing wrong); 1 failed,
-# nothing left changed; 2 usage error; 3 failed AND the undo failed:
-# read the message, it says what is left to clean up.
+#!/usr/bin/env python3
+"""issue-key: issue a backed-up host's writer key and put it straight into
+an Ansible Vault file, without the key ever touching a disk in plaintext.
 
-set -euo pipefail
-umask 077
+The out-of-band step of ADR 0002, as one command. It:
 
-# Keep the real stdout and stderr on fds 8 and 9. A trap can run while a
-# command's own redirections are still in force (a signal during the
-# gcloud call that writes to a log file), and its messages must still
-# reach the operator.
-exec 8>&1 9>&2
+  1. checks everything first: the tools, the Google account, the service
+     account, its key count, the vault file and its password, and
+     whether the variable is already set
+  2. issues a new key into a private directory on a RAM-backed
+     filesystem (tmpfs), and checks it is a key for that account
+  3. decrypts the vault there, adds the variable, re-encrypts it, checks
+     the result decrypts to exactly the old contents plus the new key,
+     and swaps it in atomically
+  4. checks the vault on disk once more
 
-PROG="issue-key"
-sa="" account="" project="" vault_file="" var="" work_parent=""
-rotate=0 create_vault=0 apply=0 allow_disk=0
-vault_args=()
+Any failure after the key is issued undoes the work: the original vault
+is put back and the new key is deleted in Google Cloud, so no live key is
+left that nothing holds. If that undo fails too, it says so and prints
+what to do by hand (exit status 3). Every temporary file is shredded on
+exit, including on Ctrl-C.
 
-usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
-die_usage() { echo "$PROG: $1" >&9; echo "Run $PROG --help for usage." >&9; exit 2; }
-info() { echo "$PROG: $*" >&8; }
+The key itself is never printed, logged, passed as an argument, or
+written outside the private work directory and the encrypted vault.
 
-need_value() { if [ $# -lt 2 ] || [ -z "$2" ]; then die_usage "$1 needs a value"; fi; }
+Usage:
+  issue-key --service-account <email> --account <your email>
+            --vault-file <path> --var <variable name>
+            [--project <id>] [--rotate] [--create-vault]
+            [--vault-password-file <file>] [--vault-id <id>]...
+            [--encrypt-vault-id <id>] [--ansible-config <file>]
+            [--work-dir <dir>] [--allow-disk-work-dir] [--apply]
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --service-account) need_value "$@"; sa="$2"; shift 2 ;;
-    --account) need_value "$@"; account="$2"; shift 2 ;;
-    --project) need_value "$@"; project="$2"; shift 2 ;;
-    --vault-file) need_value "$@"; vault_file="$2"; shift 2 ;;
-    --var) need_value "$@"; var="$2"; shift 2 ;;
-    --vault-password-file) need_value "$@"; vault_args+=(--vault-password-file "$2"); shift 2 ;;
-    --vault-id) need_value "$@"; vault_args+=(--vault-id "$2"); shift 2 ;;
-    --encrypt-vault-id) need_value "$@"; encrypt_vault_id="$2"; shift 2 ;;
-    --ansible-config) need_value "$@"; export ANSIBLE_CONFIG="$2"; shift 2 ;;
-    --work-dir) need_value "$@"; work_parent="$2"; shift 2 ;;
-    --allow-disk-work-dir) allow_disk=1; shift ;;
-    --rotate) rotate=1; shift ;;
-    --create-vault) create_vault=1; shift ;;
-    --apply) apply=1; shift ;;
-    -h | --help) usage; exit 0 ;;
-    *) die_usage "unknown argument: $1" ;;
-  esac
-done
+  --service-account    the writer service account: the backup-target
+                       module's service_account_email output
+  --account            the Google account to act as. Named on every
+                       gcloud call, so another logged-in account (a work
+                       one, say) is never used by accident
+  --vault-file         the Ansible Vault file to hold the key, e.g.
+                       inventory/host_vars/<host>/vault.yml
+  --var                the variable to set, e.g. vault_offsite_backup_sa_key
+  --project            the service account's project. Defaults to the
+                       one in its email; must match it if given
+  --rotate             replace the variable if it is already set. The
+                       old keys are left valid (the host still uses one
+                       until it is re-deployed) and the commands to
+                       delete them are printed
+  --create-vault       create the vault file if it doesn't exist
+  --vault-password-file, --vault-id, --encrypt-vault-id, --ansible-config
+                       how ansible-vault finds the password, passed on
+                       to it. Without them it uses its own defaults:
+                       ANSIBLE_VAULT_PASSWORD_FILE, or an ansible.cfg in
+                       the current directory
+  --work-dir           where the plaintext lives while the script runs.
+                       Default $XDG_RUNTIME_DIR, else /dev/shm. Must be
+                       tmpfs or ramfs, so nothing reaches a disk
+  --allow-disk-work-dir  accept a work directory on a disk
+  --apply              do it. Without it, every check runs and nothing
+                       is changed
 
-# --- Arguments ------------------------------------------------------------
+Exit status: 0 done (or a dry run that found nothing wrong); 1 failed,
+nothing left changed; 2 usage error; 3 failed AND the undo failed:
+read the message, it says what is left to clean up.
 
-[ -n "$sa" ] || die_usage "--service-account is required"
-[ -n "$account" ] || die_usage "--account is required"
-[ -n "$vault_file" ] || die_usage "--vault-file is required"
-[ -n "$var" ] || die_usage "--var is required"
-[[ "$sa" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$ ]] \
-  || die_usage "--service-account must be a user-managed service account email, <id>@<project>.iam.gserviceaccount.com: got '$sa'"
-sa_project="${BASH_REMATCH[1]}"
-if [ -z "$project" ]; then
-  project="$sa_project"
-elif [ "$project" != "$sa_project" ]; then
-  die_usage "--project '$project' isn't the service account's project, '$sa_project'"
-fi
-[[ "$account" == *@* ]] || die_usage "--account must be an email address: got '$account'"
-[[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die_usage "--var must be a valid Ansible variable name: got '$var'"
-if [ -n "${ANSIBLE_CONFIG:-}" ] && [ ! -f "$ANSIBLE_CONFIG" ]; then
-  die_usage "--ansible-config $ANSIBLE_CONFIG doesn't exist"
-fi
-if [ -n "${encrypt_vault_id:-}" ]; then
-  encrypt_args=(--encrypt-vault-id "$encrypt_vault_id")
-else
-  encrypt_args=()
-fi
+Needs Python 3.10 or later and PyYAML, gcloud and ansible-vault.
+"""
 
-# --- State and the undo -------------------------------------------------
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
 
-work="" new_key_id="" issuing=0 committed=0 done_ok=0 vault_backup="" vault_existed=0
-vault_dir="" vault_tmp=""
+PROG = "issue-key"
 
-# Remove every file under the work directory without leaving its
-# contents behind. On tmpfs shred adds little, but it is cheap and holds
-# if the work directory was allowed onto a disk.
-scrub() {
-  [ -n "$work" ] && [ -d "$work" ] || return 0
-  find "$work" -type f -exec shred -u {} + 2>/dev/null || find "$work" -type f -delete 2>/dev/null || true
-  rm -rf -- "$work" 2>/dev/null || true
-}
-
-gc() { gcloud --account="$account" --project="$project" --quiet "$@"; }
-
-# The id of the key this run issued: the one in the account's key list
-# that wasn't there before. Empty if there is none.
-find_new_key() {
-  gc iam service-accounts keys list --iam-account="$sa" --managed-by=user \
-    --format='value(name.basename())' >"$work/keys-after" 2>"$work/gcloud.err" || return 1
-  grep -vxF -f "$work/old-keys" "$work/keys-after" | head -n 1 || true
-}
-
-undo() {
-  local undo_failed=0
-  # Interrupted while Google was issuing the key: it may exist with no id
-  # recorded yet. Look for it rather than leave it.
-  if [ -z "$new_key_id" ] && [ "$issuing" -eq 1 ]; then
-    if ! new_key_id="$(find_new_key)"; then
-      echo "$PROG: UNDO FAILED: a key may have been issued, and the key list can't be read to check. Look for one nothing holds:" >&9
-      echo "  gcloud iam service-accounts keys list --iam-account=$sa --project=$project --account=$account" >&9
-      undo_failed=1
-    fi
-  fi
-  [ -n "$vault_tmp" ] && rm -f -- "$vault_tmp" 2>/dev/null
-  if [ "$committed" -eq 1 ]; then
-    if [ "$vault_existed" -eq 1 ]; then
-      if cp -p -- "$vault_backup" "$vault_file"; then
-        echo "$PROG: UNDO: restored the original $vault_file" >&9
-      else
-        echo "$PROG: UNDO FAILED: could not restore $vault_file. Its original (still encrypted) is in git, or was $vault_backup" >&9
-        undo_failed=1
-      fi
-    else
-      if rm -f -- "$vault_file"; then
-        echo "$PROG: UNDO: removed $vault_file, which this run created" >&9
-      else
-        echo "$PROG: UNDO FAILED: could not remove $vault_file, which this run created" >&9
-        undo_failed=1
-      fi
-    fi
-  fi
-  if [ -n "$new_key_id" ]; then
-    if gc iam service-accounts keys delete "$new_key_id" --iam-account="$sa" >"$work/undo.out" 2>&1; then
-      echo "$PROG: UNDO: deleted the new key $new_key_id in Google Cloud" >&9
-    else
-      echo "$PROG: UNDO FAILED: the new key $new_key_id is still valid and nothing holds it. Delete it now:" >&9
-      echo "  gcloud iam service-accounts keys delete $new_key_id --iam-account=$sa --project=$project --account=$account" >&9
-      sed 's/^/  gcloud: /' "$work/undo.out" >&9 2>/dev/null || true
-      undo_failed=1
-    fi
-  fi
-  return "$undo_failed"
-}
-
-on_exit() {
-  local rc=$?
-  trap - EXIT INT TERM HUP
-  if [ "$done_ok" -ne 1 ] && { [ -n "$new_key_id" ] || [ "$issuing" -eq 1 ] || [ "$committed" -eq 1 ]; }; then
-    echo "$PROG: the run did not finish; undoing what it changed" >&9
-    if ! undo; then
-      scrub
-      echo "$PROG: FAILED, AND THE UNDO FAILED: see above." >&9
-      exit 3
-    fi
-    [ "$rc" -eq 0 ] && rc=1
-  fi
-  scrub
-  exit "$rc"
-}
-trap on_exit EXIT
-trap 'echo "$PROG: interrupted" >&9; exit 130' INT TERM HUP
-
-fail() {
-  echo "$PROG: ERROR: $1" >&9
-  shift
-  for line in "$@"; do echo "  $line" >&9; done
-  exit 1
-}
-
-# Run ansible-vault with its output in files. Ansible refuses to run with
-# a non-blocking stdout or stderr, which some terminals and wrappers give
-# it, and the files let a failure be reported in full.
-av() {
-  ansible-vault "$@" >"$work/av.out" 2>"$work/av.err" </dev/null
-}
-av_fail() {
-  fail "$1" "$(sed 's/^/ansible-vault: /' "$work/av.err" "$work/av.out" | grep -v '^ansible-vault: $' | head -20)"
-}
-
-# --- Checks (dry run and real run alike) ----------------------------------
-
-for tool in gcloud ansible-vault python3 sha256sum shred stat; do
-  command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed or not on PATH"
-done
-python3 -c 'import json, yaml' 2>/dev/null \
-  || fail "python3 can't import yaml (PyYAML): it's needed to check the vault's contents" \
-    "Debian/Ubuntu: apt install python3-yaml"
-
-# The work directory: private, and in RAM unless told otherwise.
-if [ -z "$work_parent" ]; then
-  work_parent="${XDG_RUNTIME_DIR:-/dev/shm}"
-fi
-{ [ -d "$work_parent" ] && [ -w "$work_parent" ]; } \
-  || fail "work directory $work_parent doesn't exist or isn't writable" "Choose one with --work-dir."
-fstype="$(stat -f -c %T "$work_parent")"
-if [ "$fstype" != "tmpfs" ] && [ "$fstype" != "ramfs" ] && [ "$allow_disk" -ne 1 ]; then
-  fail "work directory $work_parent is on $fstype, not tmpfs: the key would be written to a disk" \
-    "Point --work-dir at a tmpfs (\$XDG_RUNTIME_DIR, /dev/shm), or pass --allow-disk-work-dir to accept it."
-fi
-work="$(mktemp -d "$work_parent/issue-key.XXXXXXXX")" || fail "could not create a work directory in $work_parent"
-chmod 0700 "$work"
-
-[ "$apply" -eq 1 ] || info "dry run: checking only, nothing will be changed. Re-run with --apply to issue the key."
-
-# The Google account must be logged in: gcloud would otherwise prompt, or
-# fail with a less useful message, part-way through.
-gcloud auth list --format='value(account)' >"$work/accounts" 2>"$work/gcloud.err" \
-  || fail "gcloud auth list failed" "$(cat "$work/gcloud.err")"
-grep -qxF -- "$account" "$work/accounts" \
-  || fail "$account isn't logged in to gcloud on this machine" "Run: gcloud auth login $account"
-
-gc iam service-accounts describe "$sa" --format='value(email)' >"$work/sa" 2>"$work/gcloud.err" \
-  || fail "can't read service account $sa as $account" "$(sed 's/^/gcloud: /' "$work/gcloud.err")" \
-    "Does it exist (terraform apply), and can $account see it?"
-[ "$(cat "$work/sa")" = "$sa" ] || fail "gcloud described a different account: $(cat "$work/sa")"
-
-gc iam service-accounts keys list --iam-account="$sa" --managed-by=user \
-  --format='value(name.basename())' >"$work/old-keys" 2>"$work/gcloud.err" \
-  || fail "can't list the keys of $sa" "$(sed 's/^/gcloud: /' "$work/gcloud.err")"
-old_key_count="$(grep -c . "$work/old-keys" || true)"
+# A user-managed service account: <id>@<project>.iam.gserviceaccount.com.
+SA_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com")
+VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Google allows 10 user-managed keys per service account.
-[ "$old_key_count" -lt 10 ] \
-  || fail "$sa already has $old_key_count keys, Google's limit" "Delete the ones no host uses first: gcloud iam service-accounts keys list --iam-account=$sa --project=$project --account=$account"
-info "$sa exists; it has $old_key_count key(s) already"
+KEY_LIMIT = 10
+# Google can list a new key a few seconds after issuing it. Seconds to
+# wait before each look for a key an interrupted run may have left.
+KEY_LIST_RETRIES = (0, 2, 4, 8)
+EXIT_FAILED, EXIT_USAGE, EXIT_UNDO_FAILED, EXIT_INTERRUPTED = 1, 2, 3, 130
 
-# The vault file: encrypted, readable with the password, and the variable
-# set or not as the flags expect.
-if [ -e "$vault_file" ]; then
-  vault_existed=1
-  { [ -f "$vault_file" ] && [ ! -L "$vault_file" ]; } \
-    || fail "$vault_file isn't a regular file (a symlink or a directory)"
-  { [ -w "$vault_file" ] && [ -w "$(dirname -- "$vault_file")" ]; } \
-    || fail "can't write $vault_file or its directory"
-  # shellcheck disable=SC2016 # a literal $
-  head -n 1 -- "$vault_file" | grep -q '^\$ANSIBLE_VAULT;' \
-    || fail "$vault_file isn't encrypted with Ansible Vault" \
-      "This script never writes a key into a plaintext file. Encrypt it first: ansible-vault encrypt $vault_file"
-  vault_sha="$(sha256sum <"$vault_file" | cut -d' ' -f1)"
-  av decrypt "${vault_args[@]}" --output "$work/plain.yml" -- "$vault_file" \
-    || av_fail "can't decrypt $vault_file: is the vault password available (--vault-password-file, ANSIBLE_VAULT_PASSWORD_FILE or ansible.cfg)?"
-else
-  [ "$create_vault" -eq 1 ] \
-    || fail "$vault_file doesn't exist" "Pass --create-vault to create it, or check the path."
-  vault_dir="$(dirname -- "$vault_file")"
-  { [ -d "$vault_dir" ] && [ -w "$vault_dir" ]; } || fail "directory $vault_dir doesn't exist or isn't writable"
-  : >"$work/plain.yml"
-fi
 
-# What the vault holds now. Prints "set" or "unset", or fails on anything
-# that isn't a YAML mapping at the top, or that sets the variable twice.
-python3 - "$work/plain.yml" "$var" >"$work/state" 2>"$work/py.err" <<'PY' \
-  || fail "the vault's contents can't be edited safely" "$(cat "$work/py.err")"
-import re, sys, yaml
-path, var = sys.argv[1], sys.argv[2]
-text = open(path, encoding="utf-8").read()
-try:
-    data = yaml.safe_load(text)
-except yaml.YAMLError as e:
-    sys.exit(f"it isn't valid YAML: {e}")
-if data is not None and not isinstance(data, dict):
-    sys.exit("its top level isn't a mapping of variables")
-lines = [l for l in text.splitlines() if re.match(rf"^{re.escape(var)}\s*:", l)]
-if len(lines) > 1:
-    sys.exit(f"{var} is set {len(lines)} times; fix that by hand first")
-if (data or {}).get(var) is not None and not lines:
-    sys.exit(f"{var} is set, but not as a plain top-level line this script can replace")
-if any(l.strip() == "..." for l in text.splitlines()):
-    sys.exit("it contains a YAML document end marker (...); this script won't append past it")
-print("set" if lines else "unset")
-PY
-state="$(cat "$work/state")"
-if [ "$state" = "set" ] && [ "$rotate" -ne 1 ]; then
-  fail "$var is already set in $vault_file" \
-    "To replace it with a new key, re-run with --rotate. The old key stays valid until you delete it."
-fi
-if [ "$state" = "unset" ] && [ "$rotate" -eq 1 ]; then
-  info "note: --rotate given, but $var isn't set yet; it will be added"
-fi
+class Usage(Exception):
+    """A usage error: exit 2, before anything is touched."""
 
-if [ "$apply" -ne 1 ]; then
-  info "would issue a new key for $sa as $account,"
-  info "and $([ "$state" = set ] && echo replace || echo add) $var in $vault_file$([ "$vault_existed" -eq 1 ] || echo " (created)")."
-  info "dry run OK: every check passed. Nothing was changed."
-  done_ok=1
-  exit 0
-fi
 
-# --- Issue the key --------------------------------------------------------
+class Failed(Exception):
+    """A check or step failed. The message, then indented detail lines."""
 
-issuing=1
-gc iam service-accounts keys create "$work/key.json" --iam-account="$sa" \
-  >"$work/gcloud.out" 2>"$work/gcloud.err" \
-  || fail "gcloud could not issue a key for $sa" "$(sed 's/^/gcloud: /' "$work/gcloud.err")"
+    def __init__(self, message, *details):
+        super().__init__(message)
+        self.details = [line for d in details for line in str(d).splitlines() if line.strip()]
 
-# The key's id, even if what follows finds the file is wrong, so the undo
-# can delete it. Read from the key list, not trusted from the file alone.
-new_key_id="$(find_new_key)" || new_key_id=""
-file_key_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["private_key_id"])' "$work/key.json" 2>/dev/null || true)"
-if [ -z "$new_key_id" ]; then
-  new_key_id="$file_key_id"
-  [ -n "$new_key_id" ] || fail "a key was issued, but its id can't be found to check or undo it" \
-    "List the keys and delete the newest one that nothing holds: gcloud iam service-accounts keys list --iam-account=$sa --project=$project --account=$account"
-fi
-info "issued key $new_key_id"
 
-python3 - "$work/key.json" "$sa" "$project" "$new_key_id" 2>"$work/py.err" <<'PY' \
-  || fail "the issued key isn't what was asked for" "$(cat "$work/py.err")"
-import json, sys
-path, sa, project, key_id = sys.argv[1:]
-k = json.load(open(path))
-problems = []
-for field, want in (("type", "service_account"), ("client_email", sa), ("project_id", project), ("private_key_id", key_id)):
-    if k.get(field) != want:
-        problems.append(f"{field} is {k.get(field)!r}, expected {want!r}")
-if "PRIVATE KEY-----" not in k.get("private_key", ""):
-    problems.append("private_key holds no PEM private key")
-if problems:
-    sys.exit("; ".join(problems))
-PY
+class Interrupted(Exception):
+    """SIGINT, SIGTERM or SIGHUP."""
 
-# --- Write the vault ------------------------------------------------------
 
-# The new plaintext: the old text with the variable's block removed (when
-# rotating) and the key appended as a literal block. Then checked: every
-# other variable unchanged, and the new one decoding to exactly the key.
-python3 - "$work/plain.yml" "$work/new.yml" "$var" "$work/key.json" 2>"$work/py.err" <<'PY' \
-  || fail "could not build the new vault contents" "$(cat "$work/py.err")"
-import json, re, sys, yaml
-src, dst, var, key_path = sys.argv[1:]
-old_text = open(src, encoding="utf-8").read()
-key_text = open(key_path, encoding="utf-8").read()
-key = json.loads(key_text)
+def info(message):
+    print(f"{PROG}: {message}", flush=True)
 
-out, skipping = [], False
-for line in old_text.splitlines(keepends=True):
-    if re.match(rf"^{re.escape(var)}\s*:", line):
-        skipping = True
-        continue
-    if skipping and (line.strip() == "" or line[0] in " \t"):
-        continue
-    skipping = False
-    out.append(line)
-text = "".join(out)
-if text and not text.endswith("\n"):
-    text += "\n"
-if not text.strip():
-    text = "---\n"
-block = "".join("  " + l + "\n" for l in key_text.rstrip("\n").split("\n"))
-text += f"{var}: |\n{block}"
 
-old = yaml.safe_load(old_text) or {}
-new = yaml.safe_load(text)
-if not isinstance(new, dict):
-    sys.exit("the result isn't a mapping")
-if {k: v for k, v in new.items() if k != var} != {k: v for k, v in old.items() if k != var}:
-    sys.exit("the result would change other variables; nothing was written")
-if json.loads(new[var]) != key:
-    sys.exit("the result doesn't decode to the issued key")
-open(dst, "w", encoding="utf-8").write(text)
-PY
+def warn(message):
+    print(f"{PROG}: {message}", file=sys.stderr, flush=True)
 
-av encrypt "${vault_args[@]}" "${encrypt_args[@]}" --output "$work/new.enc" -- "$work/new.yml" \
-  || av_fail "could not encrypt the new vault contents"
-av decrypt "${vault_args[@]}" --output "$work/check.yml" -- "$work/new.enc" \
-  || av_fail "the newly encrypted vault doesn't decrypt with the same password"
-cmp -s "$work/new.yml" "$work/check.yml" \
-  || fail "the newly encrypted vault doesn't decrypt to what was written"
 
-# Swap it in. Refuse if someone changed the file since it was read.
-if [ "$vault_existed" -eq 1 ]; then
-  [ "$(sha256sum <"$vault_file" | cut -d' ' -f1)" = "$vault_sha" ] \
-    || fail "$vault_file changed while this ran; nothing was written to it"
-  vault_backup="$work/original.enc"
-  cp -p -- "$vault_file" "$vault_backup"
-fi
-vault_dir="$(dirname -- "$vault_file")"
-vault_tmp="$(mktemp "$vault_dir/.$(basename -- "$vault_file").issue-key.XXXXXX")" \
-  || fail "could not create a temporary file in $vault_dir"
-cat -- "$work/new.enc" >"$vault_tmp"
-if [ "$vault_existed" -eq 1 ]; then
-  chmod --reference="$vault_backup" -- "$vault_tmp"
-else
-  chmod 0600 -- "$vault_tmp"
-fi
-committed=1
-mv -f -- "$vault_tmp" "$vault_file"
-vault_tmp=""
+def detail(text):
+    """Lines under a warning: indented, without the prefix."""
+    print(text, file=sys.stderr, flush=True)
 
-# --- Check what is on disk ------------------------------------------------
 
-av decrypt "${vault_args[@]}" --output "$work/final.yml" -- "$vault_file" \
-  || av_fail "$vault_file doesn't decrypt after writing"
-cmp -s "$work/new.yml" "$work/final.yml" \
-  || fail "$vault_file on disk isn't what was written"
+# --- Arguments -------------------------------------------------------------
 
-done_ok=1
-info "done: $var in $vault_file now holds key $new_key_id for $sa."
-if [ "$state" = "set" ] && [ "$old_key_count" -gt 0 ]; then
-  info "the previous key(s) are still valid. Once the host is re-deployed with the new one, delete them:"
-  while read -r old; do
-    [ -n "$old" ] && echo "  gcloud iam service-accounts keys delete $old --iam-account=$sa --project=$project --account=$account"
-  done <"$work/old-keys"
-elif [ "$old_key_count" -gt 0 ]; then
-  info "note: $sa had $old_key_count key(s) before this one. If no host uses them, delete them."
-fi
-info "next: commit $vault_file and deploy the host."
+
+@dataclass
+class Options:
+    sa: str = ""
+    account: str = ""
+    project: str = ""
+    vault_file: str = ""
+    var: str = ""
+    work_parent: str = ""
+    encrypt_vault_id: str = ""
+    rotate: bool = False
+    create_vault: bool = False
+    apply: bool = False
+    allow_disk: bool = False
+    vault_args: list = field(default_factory=list)
+
+
+VALUE_OPTIONS = {
+    "--service-account": "sa",
+    "--account": "account",
+    "--project": "project",
+    "--vault-file": "vault_file",
+    "--var": "var",
+    "--encrypt-vault-id": "encrypt_vault_id",
+    "--work-dir": "work_parent",
+}
+FLAG_OPTIONS = {
+    "--allow-disk-work-dir": "allow_disk",
+    "--rotate": "rotate",
+    "--create-vault": "create_vault",
+    "--apply": "apply",
+}
+
+
+def parse_args(argv):
+    opts = Options()
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            sys.exit(0)
+        if arg in FLAG_OPTIONS:
+            setattr(opts, FLAG_OPTIONS[arg], True)
+            continue
+        if arg not in VALUE_OPTIONS and arg not in (
+            "--vault-password-file",
+            "--vault-id",
+            "--ansible-config",
+        ):
+            raise Usage(f"unknown argument: {arg}")
+        if not args or not args[0]:
+            raise Usage(f"{arg} needs a value")
+        value = args.pop(0)
+        if arg in ("--vault-password-file", "--vault-id"):
+            opts.vault_args += [arg, value]
+        elif arg == "--ansible-config":
+            os.environ["ANSIBLE_CONFIG"] = value
+        else:
+            setattr(opts, VALUE_OPTIONS[arg], value)
+
+    for name, attr in (
+        ("--service-account", "sa"),
+        ("--account", "account"),
+        ("--vault-file", "vault_file"),
+        ("--var", "var"),
+    ):
+        if not getattr(opts, attr):
+            raise Usage(f"{name} is required")
+    match = SA_RE.fullmatch(opts.sa)
+    if not match:
+        raise Usage(
+            "--service-account must be a user-managed service account email, "
+            f"<id>@<project>.iam.gserviceaccount.com: got '{opts.sa}'"
+        )
+    sa_project = match.group(1)
+    if not opts.project:
+        opts.project = sa_project
+    elif opts.project != sa_project:
+        raise Usage(f"--project '{opts.project}' isn't the service account's project, '{sa_project}'")
+    if "@" not in opts.account:
+        raise Usage(f"--account must be an email address: got '{opts.account}'")
+    if not VAR_RE.fullmatch(opts.var):
+        raise Usage(f"--var must be a valid Ansible variable name: got '{opts.var}'")
+    config = os.environ.get("ANSIBLE_CONFIG")
+    if config and not os.path.isfile(config):
+        raise Usage(f"--ansible-config {config} doesn't exist")
+    return opts
+
+
+# --- Signals ---------------------------------------------------------------
+
+# A signal while a command runs is acted on once the command returns, as a
+# shell trap would be: killing gcloud part-way through issuing a key could
+# leave a key Google created after the undo looked for it. Ctrl-C reaches
+# the command too, so that rarely waits long.
+_in_command = False
+_pending_signal = None
+
+
+def _on_signal(signum, _frame):
+    global _pending_signal
+    if _in_command:
+        _pending_signal = signum
+        return
+    raise Interrupted
+
+
+def _check_signal():
+    global _pending_signal
+    if _pending_signal is not None:
+        _pending_signal = None
+        raise Interrupted
+
+
+def _undo_on_signal(_signum, _frame):
+    # Undoing already: finish it. A command it runs has the signal too, and
+    # if that makes it fail the undo reports what is left.
+    warn("interrupted again; still undoing")
+
+
+def run(cmd, **kwargs):
+    """Run a command with no stdin and its output captured."""
+    global _in_command
+    _in_command = True
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, **kwargs)
+    finally:
+        _in_command = False
+        _check_signal()
+
+
+def prefixed(prefix, *texts):
+    return "\n".join(f"{prefix}{line}" for text in texts for line in text.splitlines() if line.strip())
+
+
+# --- The vault's YAML ------------------------------------------------------
+
+
+def var_line_re(var):
+    return re.compile(rf"^{re.escape(var)}\s*:")
+
+
+def vault_state(text, var):
+    """'set' or 'unset'. Fails on anything that isn't a YAML mapping at the
+    top, or that sets the variable twice or in a way this can't replace."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise Failed("the vault's contents can't be edited safely", f"it isn't valid YAML: {e}") from None
+    if data is not None and not isinstance(data, dict):
+        raise Failed("the vault's contents can't be edited safely", "its top level isn't a mapping of variables")
+    line_re = var_line_re(var)
+    lines = [line for line in text.splitlines() if line_re.match(line)]
+    problem = None
+    if len(lines) > 1:
+        problem = f"{var} is set {len(lines)} times; fix that by hand first"
+    elif (data or {}).get(var) is not None and not lines:
+        problem = f"{var} is set, but not as a plain top-level line this script can replace"
+    elif any(line.strip() == "..." for line in text.splitlines()):
+        problem = "it contains a YAML document end marker (...); this script won't append past it"
+    if problem:
+        raise Failed("the vault's contents can't be edited safely", problem)
+    return "set" if lines else "unset"
+
+
+def new_vault_text(old_text, var, key_text):
+    """The old text with the variable's block removed (when rotating) and
+    the key appended as a literal block. Then checked: every other
+    variable unchanged, and the new one decoding to exactly the key."""
+    import yaml
+
+    line_re = var_line_re(var)
+    out, skipping = [], False
+    for line in old_text.splitlines(keepends=True):
+        if line_re.match(line):
+            skipping = True
+            continue
+        if skipping and (line.strip() == "" or line[0] in " \t"):
+            continue
+        skipping = False
+        out.append(line)
+    text = "".join(out)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if not text.strip():
+        text = "---\n"
+    block = "".join(f"  {line}\n" for line in key_text.rstrip("\n").split("\n"))
+    text += f"{var}: |\n{block}"
+
+    old = yaml.safe_load(old_text) or {}
+    new = yaml.safe_load(text)
+    if not isinstance(new, dict):
+        raise Failed("could not build the new vault contents", "the result isn't a mapping")
+    if {k: v for k, v in new.items() if k != var} != {k: v for k, v in old.items() if k != var}:
+        raise Failed(
+            "could not build the new vault contents",
+            "the result would change other variables; nothing was written",
+        )
+    if json.loads(new[var]) != json.loads(key_text):
+        raise Failed("could not build the new vault contents", "the result doesn't decode to the issued key")
+    return text
+
+
+def check_key(key_text, sa, project, key_id):
+    """Fail unless the issued key file is a key for this account."""
+    try:
+        key = json.loads(key_text)
+    except ValueError as e:
+        raise Failed("the issued key isn't what was asked for", f"it isn't JSON: {e}") from None
+    if not isinstance(key, dict):
+        raise Failed("the issued key isn't what was asked for", "it isn't a JSON object")
+    problems = []
+    for name, want in (
+        ("type", "service_account"),
+        ("client_email", sa),
+        ("project_id", project),
+        ("private_key_id", key_id),
+    ):
+        if key.get(name) != want:
+            problems.append(f"{name} is {key.get(name)!r}, expected {want!r}")
+    if "PRIVATE KEY-----" not in str(key.get("private_key", "")):
+        problems.append("private_key holds no PEM private key")
+    if problems:
+        raise Failed("the issued key isn't what was asked for", "; ".join(problems))
+
+
+def file_key_id(path):
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8"))["private_key_id"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# --- The run ---------------------------------------------------------------
+
+
+class IssueKey:
+    def __init__(self, opts):
+        self.o = opts
+        self.vault = Path(opts.vault_file)
+        self.work = None  # the private work directory
+        self.vault_existed = False
+        self.old_keys = []
+        self.new_key_id = ""
+        self.issuing = False  # asked Google for a key; one may exist
+        self.committed = False  # the vault file may have been replaced
+        self.done_ok = False
+        self.vault_tmp = None
+        self.vault_backup = None
+        self.key_path = None  # where gcloud writes the new key
+        self.vault_sha = ""
+        self.plain = None  # the vault's decrypted contents
+        self.state = ""  # "set" or "unset": the variable in the vault
+        self.list_error = ""
+        self.interrupted = False
+
+    def manual(self, verb, *args):
+        o = self.o
+        return " ".join(
+            ["gcloud iam service-accounts keys", verb, *args, f"--iam-account={o.sa}"]
+            + [f"--project={o.project}", f"--account={o.account}"]
+        )
+
+    def gc(self, *args):
+        o = self.o
+        return run(["gcloud", f"--account={o.account}", f"--project={o.project}", "--quiet", *args])
+
+    def av(self, *args):
+        # Output captured: Ansible refuses a non-blocking stdout or stderr,
+        # which some terminals and wrappers give it, and a failure is
+        # reported in full.
+        return run(["ansible-vault", *args])
+
+    def av_ok(self, message, *args):
+        result = self.av(*args)
+        if result.returncode != 0:
+            detail = prefixed("ansible-vault: ", result.stderr, result.stdout).splitlines()[:20]
+            raise Failed(message, *detail)
+
+    def list_keys(self):
+        """The ids of the account's user-managed keys, or None if the list
+        can't be read."""
+        result = self.gc(
+            "iam",
+            "service-accounts",
+            "keys",
+            "list",
+            f"--iam-account={self.o.sa}",
+            "--managed-by=user",
+            "--format=value(name.basename())",
+        )
+        if result.returncode != 0:
+            self.list_error = result.stderr
+            return None
+        return [line for line in result.stdout.splitlines() if line]
+
+    def find_new_key(self):
+        """The id of the key this run issued: the one in the key list that
+        wasn't there before. Empty if there is none; None if the list
+        can't be read."""
+        keys = self.list_keys()
+        if keys is None:
+            return None
+        return next((k for k in keys if k not in self.old_keys), "")
+
+    # --- Checks (dry run and real run alike) -------------------------------
+
+    def check(self):
+        o = self.o
+        for tool in ("gcloud", "ansible-vault", "stat"):
+            if not shutil.which(tool):
+                raise Failed(f"{tool} is not installed or not on PATH")
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            raise Failed(
+                "python3 can't import yaml (PyYAML): it's needed to check the vault's contents",
+                "Debian/Ubuntu: apt install python3-yaml",
+            ) from None
+
+        # The work directory: private, and in RAM unless told otherwise.
+        parent = o.work_parent or os.environ.get("XDG_RUNTIME_DIR") or "/dev/shm"
+        if not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
+            raise Failed(f"work directory {parent} doesn't exist or isn't writable", "Choose one with --work-dir.")
+        fstype = run(["stat", "-f", "-c", "%T", parent]).stdout.strip()
+        if fstype not in ("tmpfs", "ramfs") and not o.allow_disk:
+            raise Failed(
+                f"work directory {parent} is on {fstype}, not tmpfs: the key would be written to a disk",
+                "Point --work-dir at a tmpfs ($XDG_RUNTIME_DIR, /dev/shm), or pass --allow-disk-work-dir to accept it.",
+            )
+        try:
+            self.work = Path(tempfile.mkdtemp(prefix="issue-key.", dir=parent))
+        except OSError:
+            raise Failed(f"could not create a work directory in {parent}") from None
+        self.work.chmod(0o700)
+        self.key_path = self.work / "key.json"
+
+        if not o.apply:
+            info("dry run: checking only, nothing will be changed. Re-run with --apply to issue the key.")
+
+        # The Google account must be logged in: gcloud would otherwise
+        # prompt, or fail with a less useful message, part-way through.
+        result = run(["gcloud", "auth", "list", "--format=value(account)"])
+        if result.returncode != 0:
+            raise Failed("gcloud auth list failed", result.stderr)
+        if o.account not in result.stdout.splitlines():
+            raise Failed(
+                f"{o.account} isn't logged in to gcloud on this machine", f"Run: gcloud auth login {o.account}"
+            )
+
+        result = self.gc("iam", "service-accounts", "describe", o.sa, "--format=value(email)")
+        if result.returncode != 0:
+            raise Failed(
+                f"can't read service account {o.sa} as {o.account}",
+                prefixed("gcloud: ", result.stderr),
+                f"Does it exist (terraform apply), and can {o.account} see it?",
+            )
+        if result.stdout.strip() != o.sa:
+            raise Failed(f"gcloud described a different account: {result.stdout.strip()}")
+
+        keys = self.list_keys()
+        if keys is None:
+            raise Failed(f"can't list the keys of {o.sa}", prefixed("gcloud: ", self.list_error))
+        self.old_keys = keys
+        if len(keys) >= KEY_LIMIT:
+            raise Failed(
+                f"{o.sa} already has {len(keys)} keys, Google's limit",
+                f"Delete the ones no host uses first: {self.manual('list')}",
+            )
+        info(f"{o.sa} exists; it has {len(keys)} key(s) already")
+
+        # The vault file: encrypted, readable with the password, and the
+        # variable set or not as the flags expect.
+        self.plain = self.work / "plain.yml"
+        vault = self.vault
+        if os.path.lexists(vault):
+            self.vault_existed = True
+            if vault.is_symlink() or not vault.is_file():
+                raise Failed(f"{vault} isn't a regular file (a symlink or a directory)")
+            if not (os.access(vault, os.W_OK) and os.access(vault.parent, os.W_OK)):
+                raise Failed(f"can't write {vault} or its directory")
+            with vault.open("rb") as f:
+                if not f.readline().startswith(b"$ANSIBLE_VAULT;"):
+                    raise Failed(
+                        f"{vault} isn't encrypted with Ansible Vault",
+                        "This script never writes a key into a plaintext file. "
+                        f"Encrypt it first: ansible-vault encrypt {vault}",
+                    )
+            self.vault_sha = sha256(vault)
+            self.av_ok(
+                f"can't decrypt {vault}: is the vault password available "
+                "(--vault-password-file, ANSIBLE_VAULT_PASSWORD_FILE or ansible.cfg)?",
+                "decrypt",
+                *o.vault_args,
+                "--output",
+                str(self.plain),
+                "--",
+                str(vault),
+            )
+        else:
+            if not o.create_vault:
+                raise Failed(f"{vault} doesn't exist", "Pass --create-vault to create it, or check the path.")
+            if not (vault.parent.is_dir() and os.access(vault.parent, os.W_OK)):
+                raise Failed(f"directory {vault.parent} doesn't exist or isn't writable")
+            self.plain.write_text("", encoding="utf-8")
+
+        try:
+            old_text = self.plain.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raise Failed("the vault's contents can't be edited safely", "it isn't UTF-8 text") from None
+        self.state = vault_state(old_text, o.var)
+        if self.state == "set" and not o.rotate:
+            raise Failed(
+                f"{o.var} is already set in {vault}",
+                "To replace it with a new key, re-run with --rotate. The old key stays valid until you delete it.",
+            )
+        if self.state == "unset" and o.rotate:
+            info(f"note: --rotate given, but {o.var} isn't set yet; it will be added")
+        return old_text
+
+    # --- Issue the key, write the vault ------------------------------------
+
+    def issue(self, old_text):
+        o = self.o
+        key_path = self.key_path
+        self.issuing = True
+        result = self.gc("iam", "service-accounts", "keys", "create", str(key_path), f"--iam-account={o.sa}")
+        if result.returncode != 0:
+            raise Failed(f"gcloud could not issue a key for {o.sa}", prefixed("gcloud: ", result.stderr))
+
+        # The key's id, even if what follows finds the file is wrong, so
+        # the undo can delete it. Read from the key list, not trusted from
+        # the file alone.
+        self.new_key_id = self.find_new_key() or file_key_id(key_path)
+        if not self.new_key_id:
+            raise Failed(
+                "a key was issued, but its id can't be found to check or undo it",
+                f"List the keys and delete the newest one that nothing holds: {self.manual('list')}",
+            )
+        info(f"issued key {self.new_key_id}")
+
+        try:
+            key_text = key_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise Failed("the issued key isn't what was asked for", f"it can't be read: {e}") from None
+        check_key(key_text, o.sa, o.project, self.new_key_id)
+
+        new_plain = self.work / "new.yml"
+        new_plain.write_text(new_vault_text(old_text, o.var, key_text), encoding="utf-8")
+
+        new_enc = self.work / "new.enc"
+        encrypt_args = ["--encrypt-vault-id", o.encrypt_vault_id] if o.encrypt_vault_id else []
+        self.av_ok(
+            "could not encrypt the new vault contents",
+            "encrypt",
+            *o.vault_args,
+            *encrypt_args,
+            "--output",
+            str(new_enc),
+            "--",
+            str(new_plain),
+        )
+        check = self.work / "check.yml"
+        self.av_ok(
+            "the newly encrypted vault doesn't decrypt with the same password",
+            "decrypt",
+            *o.vault_args,
+            "--output",
+            str(check),
+            "--",
+            str(new_enc),
+        )
+        if check.read_bytes() != new_plain.read_bytes():
+            raise Failed("the newly encrypted vault doesn't decrypt to what was written")
+
+        # Swap it in. Refuse if someone changed the file since it was read.
+        vault = self.vault
+        if self.vault_existed:
+            if sha256(vault) != self.vault_sha:
+                raise Failed(f"{vault} changed while this ran; nothing was written to it")
+            self.vault_backup = self.work / "original.enc"
+            shutil.copy2(vault, self.vault_backup)
+            mode = stat.S_IMODE(self.vault_backup.stat().st_mode)
+        else:
+            mode = 0o600
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f".{vault.name}.issue-key.", dir=vault.parent)
+        except OSError:
+            raise Failed(f"could not create a temporary file in {vault.parent}") from None
+        self.vault_tmp = Path(tmp)
+        with os.fdopen(fd, "wb") as f:
+            f.write(new_enc.read_bytes())
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        self.committed = True
+        os.replace(tmp, vault)
+        self.vault_tmp = None
+
+        # Check what is on disk.
+        final = self.work / "final.yml"
+        self.av_ok(
+            f"{vault} doesn't decrypt after writing", "decrypt", *o.vault_args, "--output", str(final), "--", str(vault)
+        )
+        if final.read_bytes() != new_plain.read_bytes():
+            raise Failed(f"{vault} on disk isn't what was written")
+
+    def main(self):
+        o = self.o
+        old_text = self.check()
+        if not o.apply:
+            info(f"would issue a new key for {o.sa} as {o.account},")
+            action = "replace" if self.state == "set" else "add"
+            created = "" if self.vault_existed else " (created)"
+            info(f"and {action} {o.var} in {self.vault}{created}.")
+            info("dry run OK: every check passed. Nothing was changed.")
+            self.done_ok = True
+            return
+
+        self.issue(old_text)
+
+        self.done_ok = True
+        info(f"done: {o.var} in {self.vault} now holds key {self.new_key_id} for {o.sa}.")
+        if self.state == "set" and self.old_keys:
+            info("the previous key(s) are still valid. Once the host is re-deployed with the new one, delete them:")
+            for old in self.old_keys:
+                print(f"  {self.manual('delete', old)}", flush=True)
+        elif self.old_keys:
+            info(f"note: {o.sa} had {len(self.old_keys)} key(s) before this one. If no host uses them, delete them.")
+        info(f"next: commit {self.vault} and deploy the host.")
+
+    # --- The undo ----------------------------------------------------------
+
+    def find_unrecorded_key(self):
+        """Set new_key_id to a key this run may have issued without
+        recording it. False if one may exist that can't be found."""
+        # The file gcloud wrote names it, if gcloud got that far. The key
+        # list can lag behind the issue by a few seconds.
+        self.new_key_id = file_key_id(self.key_path) if self.key_path else ""
+        if self.new_key_id:
+            return True
+        # Otherwise it is the one the list didn't have before. After a
+        # failed issue gcloud has said no, so one look; after an interrupt
+        # nothing is known, so wait for Google to list it.
+        for delay in KEY_LIST_RETRIES if self.interrupted else (0,):
+            time.sleep(delay)
+            found = self.find_new_key()
+            if found is None:
+                warn(
+                    "UNDO FAILED: a key may have been issued, and the key list can't be read to check. "
+                    "Look for one nothing holds:"
+                )
+                detail(f"  {self.manual('list')}")
+                return False
+            if found:
+                self.new_key_id = found
+                return True
+        if self.interrupted:
+            warn(
+                "UNDO FAILED: interrupted while Google was issuing a key, and no new key has appeared in its "
+                "key list. Google can list one late: check for a key nothing holds, and delete it:"
+            )
+            detail(f"  {self.manual('list')}")
+            return False
+        return True
+
+    def needs_undo(self):
+        return not self.done_ok and (self.new_key_id or self.issuing or self.committed)
+
+    def undo(self):
+        """Put back the vault and delete the new key. False if any of it
+        failed; what is left is printed."""
+        o = self.o
+        ok = True
+        # Stopped while Google was issuing the key: it may exist with no id
+        # recorded yet. Look for it rather than leave it.
+        if not self.new_key_id and self.issuing:
+            ok = self.find_unrecorded_key()
+        if self.vault_tmp is not None:
+            self.vault_tmp.unlink(missing_ok=True)
+        if self.committed:
+            vault = self.vault
+            if self.vault_existed:
+                try:
+                    fd, tmp = tempfile.mkstemp(prefix=f".{vault.name}.issue-key.", dir=vault.parent)
+                    os.close(fd)
+                    shutil.copy2(self.vault_backup, tmp)
+                    os.replace(tmp, vault)
+                    warn(f"UNDO: restored the original {vault}")
+                except OSError:
+                    warn(
+                        f"UNDO FAILED: could not restore {vault}. "
+                        f"Its original (still encrypted) is in git, or was {self.vault_backup}"
+                    )
+                    ok = False
+            else:
+                try:
+                    vault.unlink(missing_ok=True)
+                    warn(f"UNDO: removed {vault}, which this run created")
+                except OSError:
+                    warn(f"UNDO FAILED: could not remove {vault}, which this run created")
+                    ok = False
+        if self.new_key_id:
+            result = self.gc("iam", "service-accounts", "keys", "delete", self.new_key_id, f"--iam-account={o.sa}")
+            if result.returncode == 0:
+                warn(f"UNDO: deleted the new key {self.new_key_id} in Google Cloud")
+            else:
+                warn(f"UNDO FAILED: the new key {self.new_key_id} is still valid and nothing holds it. Delete it now:")
+                detail(f"  {self.manual('delete', self.new_key_id)}")
+                gcloud_output = prefixed("  gcloud: ", result.stderr, result.stdout)
+                if gcloud_output:
+                    detail(gcloud_output)
+                ok = False
+        return ok
+
+    def scrub(self):
+        """Remove every file under the work directory without leaving its
+        contents behind. On tmpfs overwriting adds little, but it is cheap
+        and holds if the work directory was allowed onto a disk."""
+        if self.work is None or not self.work.is_dir():
+            return
+        for root, _dirs, files in os.walk(self.work):
+            for name in files:
+                path = os.path.join(root, name)
+                try:
+                    size = os.path.getsize(path)
+                    with open(path, "r+b") as f:
+                        f.write(os.urandom(size))
+                        f.flush()
+                        os.fsync(f.fileno())
+                except OSError:
+                    pass
+        shutil.rmtree(self.work, ignore_errors=True)
+
+
+def main(argv):
+    os.umask(0o077)
+    try:
+        opts = parse_args(argv)
+    except Usage as e:
+        warn(str(e))
+        detail(f"Run {PROG} --help for usage.")
+        return EXIT_USAGE
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+
+    job = IssueKey(opts)
+    rc = 0
+    try:
+        job.main()
+    except Failed as e:
+        warn(f"ERROR: {e}")
+        for line in e.details:
+            detail(f"  {line}")
+        rc = EXIT_FAILED
+    except Interrupted:
+        warn("interrupted")
+        job.interrupted = True
+        rc = EXIT_INTERRUPTED
+    except Exception as e:  # noqa: BLE001 - anything unforeseen still undoes
+        warn(f"ERROR: unexpected {type(e).__name__}: {e}")
+        rc = EXIT_FAILED
+    finally:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, _undo_on_signal)
+        rc = finish(job, rc)
+    return rc
+
+
+def finish(job, rc):
+    """Undo what an unfinished run changed, then scrub the work directory.
+    The exit status."""
+    if job.needs_undo():
+        warn("the run did not finish; undoing what it changed")
+        try:
+            undone = job.undo()
+        except Exception as e:  # noqa: BLE001 - report, then exit 3
+            warn(f"UNDO FAILED: unexpected {type(e).__name__}: {e}")
+            undone = False
+        if not undone:
+            job.scrub()
+            warn("FAILED, AND THE UNDO FAILED: see above.")
+            return EXIT_UNDO_FAILED
+        rc = rc or EXIT_FAILED
+    job.scrub()
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

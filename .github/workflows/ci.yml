@@ -47,9 +47,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bats shellcheck
-          pip install --quiet "ansible-core>=2.19,<3" "ansible-lint>=26,<27"
+          pip install --quiet "ansible-core>=2.19,<3" "ansible-lint>=26,<27" "ruff>=0.16,<0.17"
       - name: Shellcheck
         run: make shellcheck
+      - name: Ruff
+        run: make ruff
       - name: Bats (scripts and role validation)
         run: make bats
       - name: Role render test
