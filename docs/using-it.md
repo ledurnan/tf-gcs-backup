@@ -122,14 +122,31 @@ your repository's `.gitignore` so it can't be committed by accident.
 
 ## 4. The encryption keys
 
+Every host encrypts to two age keys: an everyday **operator** key, kept
+in your password manager, and a **recovery** key, kept offline. Issue
+each with [`scripts/issue-age-key`](../scripts/issue-age-key), in your
+own terminal:
+
 ```bash
-age-keygen -o operator.key         # prints the public key: age1...
-age-keygen -o recovery.key
+scripts/issue-age-key --name operator --retain-days 365
+scripts/issue-age-key --name recovery --retain-days 365
 ```
 
-Give the host the **public** keys only. Keep the private keys off every
-backed-up host: one in your password manager, one offline. Anyone with
-either can read every backup; losing both loses every backup.
+It shows the private key once, on a screen that is cleared afterwards,
+then asks you to paste it back from where you saved it. Only when that
+matches is the key issued, and only then does it print the public key
+(`age1...`). Nothing is written to disk. If it fails or is interrupted
+first, the key is not issued: don't use its public key.
+
+Give the hosts the **public** keys only, in
+`offsite_backup_age_recipients`. Keep the private keys off every
+backed-up host. Anyone with either can read every backup; losing both
+loses every backup.
+
+When you replace a key, keep the old private key until the last backup
+encrypted to it has expired: the longest `retain_days` plus
+`lifecycle_slack_days` after the hosts stop using it. `--retain-days`
+makes it print that date.
 
 ## 5. The sending side
 

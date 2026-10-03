@@ -11,3 +11,7 @@ crash.log
 *-sa.json
 *.key
 .build/
+
+# Python test and bytecode caches.
+.pytest_cache/
+__pycache__/
