@@ -65,9 +65,30 @@ NOW="${OFFSITE_BACKUP_NOW:-$(date -u +%s)}"
 export CLOUDSDK_CONFIG="${CLOUDSDK_CONFIG:-$STATE_DIR/gcloud}"
 LAST_ERROR="$STATE_DIR/last-error"
 
+# Each message reaches the journal once. Under systemd, stderr is the
+# journal (JOURNAL_STREAM names it), so the message goes there alone, with
+# a <N> prefix that keeps its priority. Run by hand, it goes to the
+# terminal and to syslog, so manual runs are on record too.
+STDERR_IS_JOURNAL=false
+if [ -n "${JOURNAL_STREAM:-}" ] \
+  && [ "$(stat -L -c '%d:%i' "/proc/$$/fd/2" 2>/dev/null)" = "$JOURNAL_STREAM" ]; then
+  STDERR_IS_JOURNAL=true
+fi
+
 log() {
-  logger -t offsite-backup -p "daemon.$1" -- "$2" 2>/dev/null || true
-  echo "$2" >&2
+  if $STDERR_IS_JOURNAL; then
+    local n
+    case "$1" in
+      err) n=3 ;;
+      warning) n=4 ;;
+      notice) n=5 ;;
+      *) n=6 ;;
+    esac
+    printf '<%s>%s\n' "$n" "$2" >&2
+  else
+    logger -t offsite-backup -p "daemon.$1" -- "$2" 2>/dev/null || true
+    echo "$2" >&2
+  fi
 }
 
 # The message is also left in LAST_ERROR for offsite-backup-report, the
