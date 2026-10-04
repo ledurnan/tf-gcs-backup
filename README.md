@@ -73,13 +73,23 @@ on disk. It undoes itself if anything fails
 
 [`scripts/issue-age-key`](scripts/issue-age-key) generates the operator
 or recovery age key, shows the private key once and has you paste it
-back from where you saved it before calling it issued (step 4). What it
-can't guarantee:
+back from where you saved it before calling it issued (step 4).
+
+It keeps the key out of swap. Unless it already runs in a cgroup that
+may not swap, it runs itself again inside a systemd user scope with
+`MemorySwapMax=0` and `MemoryZSwapMax=0`. Its memory, and the tmpfs
+work directory its tools write, are charged to that scope, so neither
+can be swapped out, and the work directory is removed before the scope
+ends. If the scope can't be created it refuses to run (see
+[swap guard](docs/swap-guard.md)). `scripts/issue-age-key --check-guard`
+says whether the guard works on a machine, without making a key.
+
+What it can't guarantee:
 
 - The private key passes through Python strings, which can't be reliably
   wiped from memory.
-- Its work directory is in RAM, but tmpfs can be written to swap, unless
-  swap is encrypted or the directory is on ramfs (`--work-dir`).
+- The swap guard doesn't protect against root, against hibernation, which
+  writes all memory to disk, or against a compromised machine.
 - It can't tell whether the terminal is being recorded (`script`, tmux
   `pipe-pane`, or the terminal emulator's own logging).
 - The clipboard is outside its control, and copying the key into a

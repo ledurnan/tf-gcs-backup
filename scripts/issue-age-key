@@ -7,17 +7,22 @@ offline recovery key. This issues one of them per run. It:
 
   1. refuses to run unless stdin and stdout are a terminal, and inside
      Claude Code, where what is shown lands in the session transcript
-  2. turns off core dumps and makes the process non-dumpable, so other
+  2. keeps the key out of swap: unless it already runs in a cgroup that
+     may not swap, it runs itself again inside one, a systemd user scope
+     with MemorySwapMax=0 and MemoryZSwapMax=0. If that can't be done it
+     refuses, unless you pass --allow-swap and no swap device could write
+     memory to a disk in plaintext
+  3. turns off core dumps and makes the process non-dumpable, so other
      processes of the same user can't read its memory
-  3. generates the pair with age-keygen into a private directory in RAM,
+  4. generates the pair with age-keygen into a private directory in RAM,
      and proves it works: random bytes encrypted to the public key
      decrypt with the private key
-  4. shows the private key on the terminal's alternate screen, which is
+  5. shows the private key on the terminal's alternate screen, which is
      cleared once you have saved it, so it never enters scrollback
-  5. asks you to paste the key back from where you saved it (it doesn't
+  6. asks you to paste the key back from where you saved it (it doesn't
      echo) and checks it is the same key. Three tries; each can show the
      key again
-  6. prints the public key and what to do with it
+  7. prints the public key and what to do with it
 
 The private key is never put in a command's arguments or environment, a
 log, the clipboard or a disk. The work directory is shredded on every
@@ -27,7 +32,8 @@ key is proved saved, the key is NOT issued: don't use its public key.
 Usage:
   issue-age-key --name operator|recovery [--retain-days <days>]
                 [--slack-days <days>] [--work-dir <dir>]
-                [--allow-disk-work-dir]
+                [--allow-disk-work-dir] [--allow-swap]
+  issue-age-key --check-guard
 
   --name               which key this is: operator (everyday, kept in
                        your password manager) or recovery (kept offline)
@@ -40,6 +46,20 @@ Usage:
                        Default $XDG_RUNTIME_DIR, else /dev/shm. Must be
                        tmpfs or ramfs, so nothing reaches a disk
   --allow-disk-work-dir  accept a work directory on a disk
+  --allow-swap         run without the swap guard when systemd can't
+                       provide it, but only if every active swap device
+                       is zram or dm-crypt (or there is none). Ignored
+                       when the guard works
+  --check-guard        only report whether the key would be kept out of
+                       swap, and how, then exit: 0 it would, 1 it
+                       wouldn't. Shows no key, so it runs anywhere,
+                       Claude Code included
+
+The swap guard needs cgroup v2 with the memory controller delegated to
+the systemd user manager (the default on current distributions), and
+systemd 253 or later for MemoryZSwapMax. It doesn't protect against root,
+against hibernation (which writes all memory to disk), or against a
+compromised machine.
 
 Exit status: 0 issued; 1 failed, the key was not issued; 2 usage error;
 3 the work directory couldn't be removed: the message names the path to
@@ -55,13 +75,17 @@ import getpass
 import os
 import re
 import resource
+import subprocess
 import sys
 from pathlib import Path
 
 # The shared code is next to this script. Nothing is compiled to disk.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _swapguard  # noqa: E402
 from _keytool import (  # noqa: E402
+    EXIT_FAILED,
+    EXIT_OK,
     Failed,
     Job,
     Usage,
@@ -84,6 +108,10 @@ TRIES = 3
 SECRET_RE = re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]+", re.IGNORECASE)
 PUBLIC_RE = re.compile(r"age1[0-9a-z]+")
 PR_SET_DUMPABLE = 4
+# Set on the run inside the guarded scope, so it doesn't try again.
+IN_SCOPE = "ISSUE_AGE_KEY_IN_SCOPE"
+# Tests only: read /proc and /sys under this directory instead of /.
+TEST_ROOT = "ISSUE_AGE_KEY_TEST_ROOT"
 
 # The alternate screen: entered and cleared, then cleared and left.
 ALT_ON = "\x1b[?1049h\x1b[H\x1b[2J"
@@ -94,15 +122,23 @@ ALT_OFF = "\x1b[H\x1b[2J\x1b[3J\x1b[?1049l"
 
 
 def parse_args(argv):
-    opts = {"name": "", "retain_days": None, "slack_days": 1, "work_parent": "", "allow_disk": False}
+    opts = {
+        "name": "",
+        "retain_days": None,
+        "slack_days": 1,
+        "work_parent": "",
+        "allow_disk": False,
+        "allow_swap": False,
+        "check_guard": False,
+    }
     args = list(argv)
     while args:
         arg = args.pop(0)
         if arg in ("-h", "--help"):
             print(__doc__.strip())
             sys.exit(0)
-        if arg == "--allow-disk-work-dir":
-            opts["allow_disk"] = True
+        if arg in ("--allow-disk-work-dir", "--allow-swap", "--check-guard"):
+            opts[{"--allow-disk-work-dir": "allow_disk"}.get(arg, arg[2:].replace("-", "_"))] = True
             continue
         if arg not in ("--name", "--retain-days", "--slack-days", "--work-dir"):
             raise Usage(f"unknown argument: {arg}")
@@ -119,6 +155,8 @@ def parse_args(argv):
             if not value.isdigit():
                 raise Usage(f"{arg} must be a whole number of days: got '{value}'")
             opts[arg[2:].replace("-", "_")] = int(value)
+    if opts["check_guard"]:
+        return opts
     if not opts["name"]:
         raise Usage("--name is required: operator or recovery")
     return opts
@@ -164,12 +202,117 @@ class AltScreen:
         return False
 
 
+# --- The swap guard --------------------------------------------------------
+
+
+def guard_root():
+    return os.environ.get(TEST_ROOT) or "/"
+
+
+def rerun_command(argv):
+    """This script, with the same interpreter and arguments, in a scope
+    that may not swap."""
+    return _swapguard.scope_command([sys.executable, str(Path(__file__).resolve()), *argv])
+
+
+def unsafe_swap_lines(root):
+    try:
+        unsafe = _swapguard.unsafe_swaps(root)
+    except OSError as e:
+        return [f"can't list the swap devices: {e}"]
+    return [f"{path}: {why}" for path, why in unsafe]
+
+
+def guard(argv, allow_swap):
+    """Return once the key can't be swapped out, or the operator has
+    accepted swap that can't leak it; run this script again inside a
+    guarded scope (never returns); or fail closed."""
+    root = guard_root()
+    if root != "/":
+        warn(f"{TEST_ROOT} is set: the swap guard is reading test files under {root}")
+    now = _swapguard.status(root)
+    if now.protected:
+        info(f"swap guard: on. {now.reason}.")
+        return
+    if os.environ.get(IN_SCOPE):
+        raise Failed(
+            f"ran itself again in a scope with swap off, but the scope doesn't stop swap: {now.reason}",
+            "Run issue-age-key --check-guard to see why.",
+        )
+    problem = _swapguard.probe_scope()
+    if problem is None:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.environ[IN_SCOPE] = "1"
+        command = rerun_command(argv)
+        os.execvp(command[0], command)
+    why = f"{now.reason}, and systemd can't create a scope with swap off: {problem}"
+    if not allow_swap:
+        raise Failed(
+            f"refusing to run: the key could be written to swap. {why}",
+            "Make the guard work (a systemd user session with the memory controller delegated: "
+            "issue-age-key --check-guard says what is missing), or, if every active swap device is "
+            "zram or encrypted, pass --allow-swap.",
+        )
+    unsafe = unsafe_swap_lines(root)
+    if unsafe:
+        raise Failed(
+            "--allow-swap refused: these swap devices could write the key to a disk in plaintext",
+            *unsafe,
+            "Turn them off (sudo swapoff <device>) or encrypt them, or make the guard work.",
+        )
+    warn(f"swap guard: OFF (--allow-swap). {why}")
+    warn("every active swap device is zram or dm-crypt, so swap can't write the key to a disk in plaintext.")
+
+
+def check_guard():
+    """--check-guard: report whether issuing would keep the key out of
+    swap, and how. 0 it would, 1 it wouldn't."""
+    root = guard_root()
+    now = _swapguard.status(root)
+    print(f"protected now: {'yes' if now.protected else 'no'}. {now.reason}.")
+    if now.cgroup:
+        print(f"cgroup: {now.cgroup}")
+    if now.protected:
+        print("issuing a key would run here, guarded.")
+        return EXIT_OK
+    if os.environ.get(IN_SCOPE):
+        return EXIT_FAILED
+    problem = _swapguard.probe_scope()
+    if problem is None:
+        # Ask the same question from inside a guarded scope.
+        inner = subprocess.run(
+            rerun_command(["--check-guard"]),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, IN_SCOPE: "1"},
+        )
+        print("inside a guarded scope (systemd-run --user --scope -p MemorySwapMax=0 -p MemoryZSwapMax=0):")
+        print(prefixed("  ", inner.stdout, inner.stderr))
+        if inner.returncode == 0:
+            print("issuing a key would run itself again inside such a scope, guarded.")
+            return EXIT_OK
+        print("issuing a key would refuse: the scope doesn't stop swap.")
+        return EXIT_FAILED
+    print(f"a guarded scope can't be created: {problem}")
+    unsafe = unsafe_swap_lines(root)
+    if unsafe:
+        print("issuing a key would refuse, even with --allow-swap. Swap that could leak the key:")
+        print(prefixed("  ", *unsafe))
+    else:
+        print("issuing a key would refuse unless given --allow-swap: every active swap device is zram or encrypted.")
+    return EXIT_FAILED
+
+
 # --- The run ---------------------------------------------------------------
 
 
 class IssueAgeKey(Job):
-    def __init__(self, opts):
+    def __init__(self, opts, argv):
         self.o = opts
+        self.argv = argv
         self.name = opts["name"]
         self.public = ""
         self.issued = False
@@ -188,6 +331,7 @@ class IssueAgeKey(Job):
                 "Run it in a terminal, without redirecting its input or output.",
             )
         need_tools("age", "age-keygen")
+        guard(self.argv, self.o["allow_swap"])
         harden()
         self.work = WorkDir(self.o["work_parent"], self.o["allow_disk"])
 
@@ -320,7 +464,9 @@ def main(argv):
         opts = parse_args(argv)
     except Usage as e:
         return usage_error(e)
-    return run_job(IssueAgeKey(opts))
+    if opts["check_guard"]:
+        return check_guard()
+    return run_job(IssueAgeKey(opts, argv))
 
 
 if __name__ == "__main__":
