@@ -16,7 +16,7 @@ application-default credentials.
 
 ```hcl
 module "writer_role" {
-  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.3.0"
   project        = "your-project-id"
   role_id_prefix = "yourorgBackup"
 }
@@ -41,7 +41,7 @@ service account is bound to it, on that host's buckets only.
 
 ```hcl
 module "host_a" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.2.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.3.0"
   project            = "your-project-id"
   location           = "europe-west2"
   bucket_name_prefix = "yourorg-backup-host-a"

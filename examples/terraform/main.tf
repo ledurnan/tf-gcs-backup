@@ -3,8 +3,8 @@
 # repository and give it your own values and state backend.
 #
 # In your own repository, source the modules from a pinned tag:
-#   source = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
-#   source = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.2.0"
+#   source = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.3.0"
+#   source = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.3.0"
 
 terraform {
   required_version = ">= 1.7"
