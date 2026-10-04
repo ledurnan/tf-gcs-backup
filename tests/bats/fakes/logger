@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake logger: records its arguments instead of writing to syslog.
+set -eu
+echo "$*" >>"$FAKE_LOGGER_LOG"

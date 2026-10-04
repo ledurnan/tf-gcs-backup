@@ -21,6 +21,8 @@ setup() {
   export FAKE_GCS_LOG="$T/gcloud.log"
   export FAKE_AGE_LOG="$T/age.log"
   export FAKE_CURL_LOG="$T/curl.log"
+  export FAKE_LOGGER_LOG="$T/logger.log"
+  unset JOURNAL_STREAM
   export FAKE_BUCKETS_DIR="$T/buckets"
   mkdir -p "$OFFSITE_BACKUP_CONF_DIR" "$FAKE_GCS_DIR" "$FAKE_BUCKETS_DIR" "$T/data/app"
   echo "hello" >"$T/data/app/file.txt"
@@ -70,6 +72,50 @@ run_backup() {
   [ -f "$FAKE_GCS_DIR/example-daily/host-a/2026-06-03.tar.age" ]
   [ ! -d "$FAKE_GCS_DIR/example-weekly" ]
   [ ! -d "$FAKE_GCS_DIR/example-monthly" ]
+}
+
+# run_backup_under_journal now: runs the backup with stderr going to a
+# file that JOURNAL_STREAM names, as systemd does for a unit's stderr.
+run_backup_under_journal() {
+  local journal="$T/journal"
+  : >"$journal"
+  run bash -c 'JOURNAL_STREAM="$(stat -L -c "%d:%i" "$1")" OFFSITE_BACKUP_NOW="$2" "$3" 2>>"$1"' \
+    _ "$journal" "$1" "$BACKUP"
+}
+
+@test "under systemd each message reaches the journal once, with its priority" {
+  run_backup_under_journal "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_LOGGER_LOG" ]
+  grep -qx '<6>stored gs://example-daily/host-a/2026-06-03.tar.age ([0-9]* bytes)' "$T/journal"
+  [ "$(grep -c 'backup complete' "$T/journal")" -eq 1 ]
+  [ -z "$(grep -v '^<[0-7]>' "$T/journal")" ]
+}
+
+@test "under systemd a failure is logged once, at err priority" {
+  tier_buckets daily:7:8
+  run_backup_under_journal "$MONDAY_FIRST"
+  [ "$status" -eq 1 ]
+  [ ! -e "$FAKE_LOGGER_LOG" ]
+  [ "$(grep -c '^<3>' "$T/journal")" -eq 1 ]
+}
+
+@test "run by hand, messages go to the terminal and to syslog" {
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stored gs://example-daily/host-a/2026-06-03.tar.age"* ]]
+  [[ "$output" != *"<6>"* ]]
+  grep -q -- '-t offsite-backup -p daemon.info -- stored gs://example-daily/host-a/2026-06-03.tar.age' "$FAKE_LOGGER_LOG"
+  [ "$(grep -c 'backup complete' "$FAKE_LOGGER_LOG")" -eq 1 ]
+}
+
+@test "an inherited JOURNAL_STREAM that is not stderr counts as a run by hand" {
+  : >"$T/elsewhere"
+  JOURNAL_STREAM="$(stat -L -c '%d:%i' "$T/elsewhere")" run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"backup complete"* ]]
+  [[ "$output" != *"<6>"* ]]
+  grep -q 'backup complete' "$FAKE_LOGGER_LOG"
 }
 
 @test "weekday and monthday tiers fire on their day, with their name formats" {
