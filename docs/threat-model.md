@@ -9,7 +9,7 @@ and what's left over.
 Statuses:
 
 - **In place**: in the latest release.
-- **Unreleased**: on the `feat/v0.2` branch, not yet tagged.
+- **Unreleased**: on `main`, not yet tagged.
 - **Proposed**: designed, not built. See the linked issue.
 - **Consumer**: outside this repository; each project that uses it must
   do it.
@@ -189,8 +189,8 @@ What's left after the in-place controls, and what would reduce it.
 | T27 tampered supply chain           | C17                                     | Medium. The release file is fetched over TLS from GitHub but not verified against a checksum.                                                                                                                                                                                                                                                                                                           | C31           |
 | T28 git install corrupts repo       | C17                                     | Low.                                                                                                                                                                                                                                                                                                                                                                                                    | —             |
 | T29 another consumer in the project | v0.2: C35                               | Low, provided consumers keep to their own prefixes. Nothing technical stops one reusing another's names.                                                                                                                                                                                                                                                                                                | —             |
-| T30 same-period re-run              | v0.2: C36                               | Low. A re-run keeps the stored copy and succeeds; a retry writes only the missing tiers.                                                                                                                                                                                                                                                                                                                | —             |
-| T31 name squatting                  | v0.2: C36                               | Medium. Detected the day each squatted period comes due, and reported, but that period's copy in that tier is lost unless the name is cleared: possible in an unlocked tier ([`emergency.md`](emergency.md)), not in a locked one. Changing the tier's `name_format` sidesteps the squatted names.                                                                                                      | C24, C25, C29 |
+| T30 same-period re-run              | v0.3: C36                               | Low. A re-run keeps the stored copy and succeeds; a retry writes only the missing tiers.                                                                                                                                                                                                                                                                                                                | —             |
+| T31 name squatting                  | v0.3: C36                               | Medium. Detected the day each squatted period comes due, and reported, but that period's copy in that tier is lost unless the name is cleared: possible in an unlocked tier ([`emergency.md`](emergency.md)), not in a locked one. Changing the tier's `name_format` sidesteps the squatted names.                                                                                                      | C24, C25, C29 |
 
 ## Keeping this current
 
