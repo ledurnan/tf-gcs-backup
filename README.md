@@ -21,13 +21,13 @@ values, credentials and Terraform state.
 
 ```hcl
 module "writer_role" {
-  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.2.0"
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.3.0"
   project        = "your-project-id"
   role_id_prefix = "yourorgHostA" # roles yourorgHostAWriter, yourorgHostAEmergency
 }
 
 module "host_a" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.2.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.3.0"
   project            = "your-project-id"
   location           = "europe-west2"
   bucket_name_prefix = "yourorg-backup-host-a" # buckets: <prefix>-<tier>
@@ -43,7 +43,7 @@ module "host_a" {
 ```yaml
 # requirements.yml
 collections:
-  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.2.0/ledurnan-gcs_backup-0.2.0.tar.gz
+  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.3.0/ledurnan-gcs_backup-0.3.0.tar.gz
     type: url
 ```
 
@@ -105,7 +105,7 @@ restored is a rumour.
 
 Upgrading from v0.1: [`docs/upgrading-to-v0.2.md`](docs/upgrading-to-v0.2.md).
 
-v0.2 supports Debian and Ubuntu hosts with systemd. Not covered: other
+It supports Debian and Ubuntu hosts with systemd. Not covered: other
 clouds, VM or disk images, and deduplicating or incremental backup. This
 pattern writes a full copy per tier, trading storage efficiency for a
 host that can't delete its own backups. Everything else it doesn't
