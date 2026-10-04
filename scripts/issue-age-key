@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""issue-age-key: generate an age key pair for the backups, show the
+private key once, and prove it was saved before calling it issued.
+
+Every host encrypts to two recipients: an everyday operator key and an
+offline recovery key. This issues one of them per run. It:
+
+  1. refuses to run unless stdin and stdout are a terminal, and inside
+     Claude Code, where what is shown lands in the session transcript
+  2. turns off core dumps and makes the process non-dumpable, so other
+     processes of the same user can't read its memory
+  3. generates the pair with age-keygen into a private directory in RAM,
+     and proves it works: random bytes encrypted to the public key
+     decrypt with the private key
+  4. shows the private key on the terminal's alternate screen, which is
+     cleared once you have saved it, so it never enters scrollback
+  5. asks you to paste the key back from where you saved it (it doesn't
+     echo) and checks it is the same key. Three tries; each can show the
+     key again
+  6. prints the public key and what to do with it
+
+The private key is never put in a command's arguments or environment, a
+log, the clipboard or a disk. The work directory is shredded on every
+exit, including on Ctrl-C. If the run fails or is interrupted before the
+key is proved saved, the key is NOT issued: don't use its public key.
+
+Usage:
+  issue-age-key --name operator|recovery [--retain-days <days>]
+                [--slack-days <days>] [--work-dir <dir>]
+                [--allow-disk-work-dir]
+
+  --name               which key this is: operator (everyday, kept in
+                       your password manager) or recovery (kept offline)
+  --retain-days        the longest retain_days of any tier encrypting to
+                       this key. Given, the reminder of how long to keep
+                       a rotated key gives a date
+  --slack-days         lifecycle_slack_days, the same as the hosts'.
+                       Default 1, the module's default
+  --work-dir           where the key lives while the script runs.
+                       Default $XDG_RUNTIME_DIR, else /dev/shm. Must be
+                       tmpfs or ramfs, so nothing reaches a disk
+  --allow-disk-work-dir  accept a work directory on a disk
+
+Exit status: 0 issued; 1 failed, the key was not issued; 2 usage error;
+3 the work directory couldn't be removed: the message names the path to
+shred by hand.
+
+Needs Python 3.10 or later, age and age-keygen.
+"""
+
+import contextlib
+import ctypes
+import datetime
+import getpass
+import os
+import re
+import resource
+import sys
+from pathlib import Path
+
+# The shared code is next to this script. Nothing is compiled to disk.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _keytool import (  # noqa: E402
+    Failed,
+    Job,
+    Usage,
+    WorkDir,
+    detail,
+    info,
+    need_tools,
+    prefixed,
+    run,
+    run_job,
+    set_prog,
+    usage_error,
+    warn,
+)
+
+set_prog("issue-age-key")
+
+NAMES = ("operator", "recovery")
+TRIES = 3
+SECRET_RE = re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]+", re.IGNORECASE)
+PUBLIC_RE = re.compile(r"age1[0-9a-z]+")
+PR_SET_DUMPABLE = 4
+
+# The alternate screen: entered and cleared, then cleared and left.
+ALT_ON = "\x1b[?1049h\x1b[H\x1b[2J"
+ALT_OFF = "\x1b[H\x1b[2J\x1b[3J\x1b[?1049l"
+
+
+# --- Arguments -------------------------------------------------------------
+
+
+def parse_args(argv):
+    opts = {"name": "", "retain_days": None, "slack_days": 1, "work_parent": "", "allow_disk": False}
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            sys.exit(0)
+        if arg == "--allow-disk-work-dir":
+            opts["allow_disk"] = True
+            continue
+        if arg not in ("--name", "--retain-days", "--slack-days", "--work-dir"):
+            raise Usage(f"unknown argument: {arg}")
+        if not args or not args[0]:
+            raise Usage(f"{arg} needs a value")
+        value = args.pop(0)
+        if arg == "--name":
+            if value not in NAMES:
+                raise Usage(f"--name must be operator or recovery: got '{value}'")
+            opts["name"] = value
+        elif arg == "--work-dir":
+            opts["work_parent"] = value
+        else:
+            if not value.isdigit():
+                raise Usage(f"{arg} must be a whole number of days: got '{value}'")
+            opts[arg[2:].replace("-", "_")] = int(value)
+    if not opts["name"]:
+        raise Usage("--name is required: operator or recovery")
+    return opts
+
+
+# --- The terminal ----------------------------------------------------------
+
+
+def harden():
+    """No core dumps, and no reading this process's memory through
+    /proc or ptrace by other processes of the same user."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ValueError, OSError) as e:
+        raise Failed(f"could not turn off core dumps: {e}") from None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        failed = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+    except (OSError, AttributeError):
+        failed = True
+    if failed:
+        raise Failed("could not make the process non-dumpable (prctl PR_SET_DUMPABLE): this needs Linux")
+
+
+def write(text):
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+class AltScreen:
+    """The terminal's alternate screen, cleared on the way out whatever
+    happens, so what it showed never reaches the normal screen's
+    scrollback."""
+
+    def __enter__(self):
+        write(ALT_ON)
+        return self
+
+    def __exit__(self, *exc):
+        # OSError: the terminal has gone (SIGHUP), so nothing is left to clear.
+        with contextlib.suppress(OSError):
+            write(ALT_OFF)
+        return False
+
+
+# --- The run ---------------------------------------------------------------
+
+
+class IssueAgeKey(Job):
+    def __init__(self, opts):
+        self.o = opts
+        self.name = opts["name"]
+        self.public = ""
+        self.issued = False
+
+    def main(self):
+        # Checks.
+        if "CLAUDECODE" in os.environ:
+            raise Failed(
+                "refusing to run inside Claude Code: what it shows would land in the session transcript",
+                "Run it in your own terminal, outside Claude Code.",
+            )
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise Failed(
+                "stdin and stdout must both be a terminal: the private key is shown once, on screen, "
+                "and never sent to a pipe or a file",
+                "Run it in a terminal, without redirecting its input or output.",
+            )
+        need_tools("age", "age-keygen")
+        harden()
+        self.work = WorkDir(self.o["work_parent"], self.o["allow_disk"])
+
+        secret = self.generate()
+        self.prove_pair()
+        self.show(secret)
+        self.confirm(secret)
+        self.issued = True
+        self.report()
+
+    def generate(self):
+        key = self.work / "key"
+        result = run(["age-keygen", "-o", str(key)])
+        if result.returncode != 0:
+            raise Failed("age-keygen could not generate a key", prefixed("age-keygen: ", result.stderr))
+        result = run(["age-keygen", "-y", str(key)])
+        public = result.stdout.strip()
+        if result.returncode != 0 or not PUBLIC_RE.fullmatch(public):
+            raise Failed("age-keygen generated a key it can't read back", prefixed("age-keygen: ", result.stderr))
+        self.public = public
+        secrets = [line for line in key.read_text(encoding="ascii").splitlines() if SECRET_RE.fullmatch(line)]
+        if len(secrets) != 1:
+            raise Failed("age-keygen wrote a key file this script doesn't understand")
+        return secrets[0]
+
+    def prove_pair(self):
+        """Random bytes encrypted to the public key decrypt with the
+        private key."""
+        plain = os.urandom(64)
+        enc = run(["age", "-r", self.public], input=plain, text=False)
+        if enc.returncode != 0:
+            raise Failed(
+                "age can't encrypt to the new public key", prefixed("age: ", enc.stderr.decode(errors="replace"))
+            )
+        dec = run(["age", "-d", "-i", str(self.work / "key")], input=enc.stdout, text=False)
+        if dec.returncode != 0 or dec.stdout != plain:
+            raise Failed(
+                "the new key pair doesn't work: what was encrypted to the public key didn't decrypt",
+                prefixed("age: ", dec.stderr.decode(errors="replace")),
+            )
+
+    def show(self, secret):
+        if self.name == "recovery":
+            where = [
+                "Save it now OFFLINE: on paper or in an offline password manager, apart from",
+                "the operator key. It is what reads the backups when everything else is lost.",
+            ]
+        else:
+            where = ["Save it now in your password manager."]
+        lines = [
+            "",
+            f"The {self.name} age PRIVATE key. It is shown here once.",
+            "",
+            *where,
+            "",
+            "Clipboard managers keep a history. If you copy it, clear that history afterwards.",
+            "Anyone with this key can read every backup; losing both the operator and the",
+            "recovery key makes every backup unreadable.",
+            "",
+            f"Public key:   {self.public}",
+            f"Private key:  {secret}",
+            "",
+            "Press Enter once it is saved. The screen will be cleared.",
+        ]
+        with AltScreen():
+            write("".join(f"  {line}\n" if line else "\n" for line in lines))
+            sys.stdin.readline()
+
+    def confirm(self, secret):
+        """Ask for the key back from where it was saved, until it matches
+        or the tries run out."""
+        for attempt in range(1, TRIES + 1):
+            pasted = getpass.getpass(
+                f"{self.name} key: paste the private key back from where you saved it (it won't echo): "
+            ).strip()
+            problem = self.check_pasted(pasted)
+            if problem is None:
+                return
+            warn(f"that doesn't match: {problem} (try {attempt} of {TRIES})")
+            if attempt == TRIES:
+                break
+            write("Show the key again? [y/N] ")
+            if sys.stdin.readline().strip().lower() in ("y", "yes"):
+                self.show(secret)
+        raise Failed(
+            f"what was pasted back didn't match the new {self.name} key in {TRIES} tries",
+            "Delete whatever you saved for it, and run issue-age-key again.",
+        )
+
+    def check_pasted(self, pasted):
+        """None if pasted is the private key of the new pair; otherwise
+        what is wrong with it."""
+        if not SECRET_RE.fullmatch(pasted):
+            return "it isn't an age private key (AGE-SECRET-KEY-1...)"
+        result = run(["age-keygen", "-y"], input=pasted + "\n")
+        if result.returncode != 0:
+            return "age can't read it, which usually means a character is wrong or missing"
+        if result.stdout.strip() != self.public:
+            return "it is a valid age key, but a different one from the key just generated"
+        return None
+
+    def report(self):
+        o = self.o
+        info(f"the {self.name} key is issued. Its public key:")
+        print(f"\n  {self.public}\n", flush=True)
+        info("next: add it to offsite_backup_age_recipients on every host, alongside the other key, and re-deploy.")
+        keep = "the longest retain_days of any tier plus lifecycle_slack_days, after the hosts stop using it"
+        if o["retain_days"] is not None:
+            days = o["retain_days"] + o["slack_days"]
+            until = datetime.date.today() + datetime.timedelta(days=days)
+            keep = (
+                f"{o['retain_days']} + {o['slack_days']} = {days} days after the hosts stop using it "
+                f"(if they stopped today, until {until})"
+            )
+        info(
+            "when this key is rotated out, keep its private key until the last backup encrypted to it "
+            f"has expired: {keep}."
+        )
+
+    def on_failure(self):
+        if not self.public:
+            warn(f"the {self.name} key was NOT issued.")
+            return
+        warn(f"the {self.name} key was NOT issued. Don't use its public key ({self.public}).")
+        detail("  If you saved the private key anywhere, delete it, then run issue-age-key again.")
+
+
+def main(argv):
+    try:
+        opts = parse_args(argv)
+    except Usage as e:
+        return usage_error(e)
+    return run_job(IssueAgeKey(opts))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

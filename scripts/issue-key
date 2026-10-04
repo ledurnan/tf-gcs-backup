@@ -70,16 +70,33 @@ import json
 import os
 import re
 import shutil
-import signal
 import stat
-import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROG = "issue-key"
+# The shared code is next to this script. Nothing is compiled to disk.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _keytool import (  # noqa: E402
+    Failed,
+    Job,
+    Usage,
+    WorkDir,
+    detail,
+    info,
+    need_tools,
+    prefixed,
+    run,
+    run_job,
+    set_prog,
+    usage_error,
+    warn,
+)
+
+set_prog("issue-key")
 
 # A user-managed service account: <id>@<project>.iam.gserviceaccount.com.
 SA_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com")
@@ -89,36 +106,6 @@ KEY_LIMIT = 10
 # Google can list a new key a few seconds after issuing it. Seconds to
 # wait before each look for a key an interrupted run may have left.
 KEY_LIST_RETRIES = (0, 2, 4, 8)
-EXIT_FAILED, EXIT_USAGE, EXIT_UNDO_FAILED, EXIT_INTERRUPTED = 1, 2, 3, 130
-
-
-class Usage(Exception):
-    """A usage error: exit 2, before anything is touched."""
-
-
-class Failed(Exception):
-    """A check or step failed. The message, then indented detail lines."""
-
-    def __init__(self, message, *details):
-        super().__init__(message)
-        self.details = [line for d in details for line in str(d).splitlines() if line.strip()]
-
-
-class Interrupted(Exception):
-    """SIGINT, SIGTERM or SIGHUP."""
-
-
-def info(message):
-    print(f"{PROG}: {message}", flush=True)
-
-
-def warn(message):
-    print(f"{PROG}: {message}", file=sys.stderr, flush=True)
-
-
-def detail(text):
-    """Lines under a warning: indented, without the prefix."""
-    print(text, file=sys.stderr, flush=True)
 
 
 # --- Arguments -------------------------------------------------------------
@@ -211,52 +198,6 @@ def parse_args(argv):
     if config and not os.path.isfile(config):
         raise Usage(f"--ansible-config {config} doesn't exist")
     return opts
-
-
-# --- Signals ---------------------------------------------------------------
-
-# A signal while a command runs is acted on once the command returns, as a
-# shell trap would be: killing gcloud part-way through issuing a key could
-# leave a key Google created after the undo looked for it. Ctrl-C reaches
-# the command too, so that rarely waits long.
-_in_command = False
-_pending_signal = None
-
-
-def _on_signal(signum, _frame):
-    global _pending_signal
-    if _in_command:
-        _pending_signal = signum
-        return
-    raise Interrupted
-
-
-def _check_signal():
-    global _pending_signal
-    if _pending_signal is not None:
-        _pending_signal = None
-        raise Interrupted
-
-
-def _undo_on_signal(_signum, _frame):
-    # Undoing already: finish it. A command it runs has the signal too, and
-    # if that makes it fail the undo reports what is left.
-    warn("interrupted again; still undoing")
-
-
-def run(cmd, **kwargs):
-    """Run a command with no stdin and its output captured."""
-    global _in_command
-    _in_command = True
-    try:
-        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, **kwargs)
-    finally:
-        _in_command = False
-        _check_signal()
-
-
-def prefixed(prefix, *texts):
-    return "\n".join(f"{prefix}{line}" for text in texts for line in text.splitlines() if line.strip())
 
 
 # --- The vault's YAML ------------------------------------------------------
@@ -366,11 +307,10 @@ def sha256(path):
 # --- The run ---------------------------------------------------------------
 
 
-class IssueKey:
+class IssueKey(Job):
     def __init__(self, opts):
         self.o = opts
         self.vault = Path(opts.vault_file)
-        self.work = None  # the private work directory
         self.vault_existed = False
         self.old_keys = []
         self.new_key_id = ""
@@ -384,7 +324,6 @@ class IssueKey:
         self.plain = None  # the vault's decrypted contents
         self.state = ""  # "set" or "unset": the variable in the vault
         self.list_error = ""
-        self.interrupted = False
 
     def manual(self, verb, *args):
         o = self.o
@@ -439,9 +378,7 @@ class IssueKey:
 
     def check(self):
         o = self.o
-        for tool in ("gcloud", "ansible-vault", "stat"):
-            if not shutil.which(tool):
-                raise Failed(f"{tool} is not installed or not on PATH")
+        need_tools("gcloud", "ansible-vault")
         try:
             import yaml  # noqa: F401
         except ImportError:
@@ -451,20 +388,7 @@ class IssueKey:
             ) from None
 
         # The work directory: private, and in RAM unless told otherwise.
-        parent = o.work_parent or os.environ.get("XDG_RUNTIME_DIR") or "/dev/shm"
-        if not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
-            raise Failed(f"work directory {parent} doesn't exist or isn't writable", "Choose one with --work-dir.")
-        fstype = run(["stat", "-f", "-c", "%T", parent]).stdout.strip()
-        if fstype not in ("tmpfs", "ramfs") and not o.allow_disk:
-            raise Failed(
-                f"work directory {parent} is on {fstype}, not tmpfs: the key would be written to a disk",
-                "Point --work-dir at a tmpfs ($XDG_RUNTIME_DIR, /dev/shm), or pass --allow-disk-work-dir to accept it.",
-            )
-        try:
-            self.work = Path(tempfile.mkdtemp(prefix="issue-key.", dir=parent))
-        except OSError:
-            raise Failed(f"could not create a work directory in {parent}") from None
-        self.work.chmod(0o700)
+        self.work = WorkDir(o.work_parent, o.allow_disk)
         self.key_path = self.work / "key.json"
 
         if not o.apply:
@@ -745,78 +669,13 @@ class IssueKey:
                 ok = False
         return ok
 
-    def scrub(self):
-        """Remove every file under the work directory without leaving its
-        contents behind. On tmpfs overwriting adds little, but it is cheap
-        and holds if the work directory was allowed onto a disk."""
-        if self.work is None or not self.work.is_dir():
-            return
-        for root, _dirs, files in os.walk(self.work):
-            for name in files:
-                path = os.path.join(root, name)
-                try:
-                    size = os.path.getsize(path)
-                    with open(path, "r+b") as f:
-                        f.write(os.urandom(size))
-                        f.flush()
-                        os.fsync(f.fileno())
-                except OSError:
-                    pass
-        shutil.rmtree(self.work, ignore_errors=True)
-
 
 def main(argv):
-    os.umask(0o077)
     try:
         opts = parse_args(argv)
     except Usage as e:
-        warn(str(e))
-        detail(f"Run {PROG} --help for usage.")
-        return EXIT_USAGE
-
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, _on_signal)
-
-    job = IssueKey(opts)
-    rc = 0
-    try:
-        job.main()
-    except Failed as e:
-        warn(f"ERROR: {e}")
-        for line in e.details:
-            detail(f"  {line}")
-        rc = EXIT_FAILED
-    except Interrupted:
-        warn("interrupted")
-        job.interrupted = True
-        rc = EXIT_INTERRUPTED
-    except Exception as e:  # noqa: BLE001 - anything unforeseen still undoes
-        warn(f"ERROR: unexpected {type(e).__name__}: {e}")
-        rc = EXIT_FAILED
-    finally:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(signum, _undo_on_signal)
-        rc = finish(job, rc)
-    return rc
-
-
-def finish(job, rc):
-    """Undo what an unfinished run changed, then scrub the work directory.
-    The exit status."""
-    if job.needs_undo():
-        warn("the run did not finish; undoing what it changed")
-        try:
-            undone = job.undo()
-        except Exception as e:  # noqa: BLE001 - report, then exit 3
-            warn(f"UNDO FAILED: unexpected {type(e).__name__}: {e}")
-            undone = False
-        if not undone:
-            job.scrub()
-            warn("FAILED, AND THE UNDO FAILED: see above.")
-            return EXIT_UNDO_FAILED
-        rc = rc or EXIT_FAILED
-    job.scrub()
-    return rc
+        return usage_error(e)
+    return run_job(IssueKey(opts))
 
 
 if __name__ == "__main__":
