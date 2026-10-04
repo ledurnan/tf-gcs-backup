@@ -5,7 +5,9 @@ From nothing to a verified, locked backup for one host. Repeat steps 2 to
 
 ## 0. Once per project: identity and state
 
-Run [`scripts/bootstrap-project`](../scripts/bootstrap-project) and read
+Start from a project that holds nothing but backups, one per system
+([ADR 0010](adr/0010-backup-only-project.md)). Then run
+[`scripts/bootstrap-project`](../scripts/bootstrap-project) and read
 [`identity-and-state.md`](identity-and-state.md): Terraform runs as a
 dedicated service account through `scripts/tf-with-identity`, never on
 application-default credentials.

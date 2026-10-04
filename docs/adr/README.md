@@ -15,3 +15,4 @@ them.
 | [0007](0007-bucket-retention-policy-per-tier.md)   | Retention is a bucket policy, one bucket per tier; the host never chooses it   | Accepted |
 | [0008](0008-emergency-access-to-unlocked-tiers.md) | Optional emergency principal, on unlocked tiers only                           | Accepted |
 | [0009](0009-consumers-sharing-a-project.md)        | Consumers sharing a project name their own roles, buckets and service accounts | Accepted |
+| [0010](0010-backup-only-project.md)                | Keep backups in a project that holds nothing else, one per system              | Proposed |

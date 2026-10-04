@@ -54,12 +54,13 @@ Cloud's own infrastructure.
 
 ### From the cloud side
 
-| ID  | Threat                                                                                                                                                      |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T11 | An operator or project owner account is compromised and used to delete backups, weaken retention, or read objects.                                          |
-| T12 | The Terraform identity, or a bad or malicious plan, weakens the setup: grants delete through bucket IAM, adds delete to the writer role, changes lifecycle. |
-| T13 | The project is deleted, suspended, or loses billing, and Google deletes its data.                                                                           |
-| T14 | A regional outage or loss makes backups unavailable when they're needed.                                                                                    |
+| ID  | Threat                                                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T11 | An operator or project owner account is compromised and used to delete backups, weaken retention, or read objects.                                                                    |
+| T12 | The Terraform identity, or a bad or malicious plan, weakens the setup: grants delete through bucket IAM, adds delete to the writer role, changes lifecycle.                           |
+| T13 | The project is deleted, suspended, or loses billing, and Google deletes its data.                                                                                                     |
+| T14 | A regional outage or loss makes backups unavailable when they're needed.                                                                                                              |
+| T32 | An identity granted a project-wide role for an unrelated service (a CI deploy account, an application account, an Editor) deletes or empties backups, by mistake or once compromised. |
 
 ### Keys and secrets
 
@@ -121,6 +122,7 @@ Cloud's own infrastructure.
 | C16 | Fail closed: a missing path, a failing pre-backup hook, failed encryption or an empty archive uploads nothing and reports why.                                                                                                                               | `offsite-backup`                                                        | T20, T21          |
 | C17 | The collection is installed from the release file built by CI, never from git ([ADR 0005](adr/0005-distribution.md)). Google's apt repository is signed.                                                                                                     | `.github/workflows/release.yml`, README                                 | T27, T28          |
 | C18 | Guidance: start unlocked and lock only after a restore test passes. Choose retention from what the service has promised ([`retention.md`](retention.md)).                                                                                                    | `docs/using-it.md`, `docs/retention.md`                                 | T24, T25, T26     |
+| C37 | Guidance: keep backups in a project that holds nothing else, one per system, so no unrelated identity holds project-wide delete ([ADR 0010](adr/0010-backup-only-project.md)).                                                                               | Consumer; `docs/identity-and-state.md`                                  | T32               |
 
 ### Unreleased
 
@@ -191,6 +193,7 @@ What's left after the in-place controls, and what would reduce it.
 | T29 another consumer in the project | v0.2: C35                               | Low, provided consumers keep to their own prefixes. Nothing technical stops one reusing another's names.                                                                                                                                                                                                                                                                                                | —             |
 | T30 same-period re-run              | v0.3: C36                               | Low. A re-run keeps the stored copy and succeeds; a retry writes only the missing tiers.                                                                                                                                                                                                                                                                                                                | —             |
 | T31 name squatting                  | v0.3: C36                               | Medium. Detected the day each squatted period comes due, and reported, but that period's copy in that tier is lost unless the name is cleared: possible in an unlocked tier ([`emergency.md`](emergency.md)), not in a locked one. Changing the tier's `name_format` sidesteps the squatted names.                                                                                                      | C24, C25, C29 |
+| T32 unrelated project-wide grants   | C37                                     | Low in a backup-only project: only the owners, any emergency principal and the Terraform identity can remove backups. **Open** in a project shared with other services: every role there that includes delete reaches unlocked tiers. Locked tiers survive it.                                                                                                                                          |
 
 ## Keeping this current
 

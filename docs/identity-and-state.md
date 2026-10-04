@@ -25,6 +25,13 @@ else. `.tf-identity` holds no secrets and is committed.
 
 ## Setting up a project, once
 
+Use a project that holds nothing but backups, one per system, and put
+any other cloud service in a different project
+([ADR 0010](adr/0010-backup-only-project.md)). Most IAM roles are
+granted per project, so a project shared with running services lets
+their identities delete the backups. Project IDs can't be changed, so
+name it for what it holds, for example `yourorg-app-backup`.
+
 [`scripts/bootstrap-project`](../scripts/bootstrap-project), run by a
 project owner **as themselves**:
 
