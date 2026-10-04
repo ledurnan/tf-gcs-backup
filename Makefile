@@ -2,7 +2,7 @@
 
 TF_DIRS := modules/project-role modules/backup-target
 BUILD := .build
-PY := scripts/issue-key scripts/issue-age-key scripts/_keytool.py tests/python
+PY := scripts/issue-key scripts/issue-age-key scripts/_keytool.py scripts/_swapguard.py tests/python
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'

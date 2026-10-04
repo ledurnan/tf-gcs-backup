@@ -138,6 +138,10 @@ matches is the key issued, and only then does it print the public key
 (`age1...`). Nothing is written to disk. If it fails or is interrupted
 first, the key is not issued: don't use its public key.
 
+It runs itself in a systemd scope that may not swap, and refuses to run
+if it can't ([swap guard](swap-guard.md)). Check a machine first with
+`scripts/issue-age-key --check-guard`.
+
 Give the hosts the **public** keys only, in
 `offsite_backup_age_recipients`. Keep the private keys off every
 backed-up host. Anyone with either can read every backup; losing both

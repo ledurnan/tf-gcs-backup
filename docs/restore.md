@@ -36,6 +36,14 @@ age -d -i operator.key 2026-06-03.tar.age | tar -xz -C ./restore
 
 Never unpack straight over a live system.
 
+The private key, and the plaintext it decrypts, can be written to swap.
+Do this in a shell where they can't be, and delete the decrypted files
+before leaving it ([swap guard](swap-guard.md)):
+
+```bash
+systemd-run --user --scope -p MemorySwapMax=0 -p MemoryZSwapMax=0 bash
+```
+
 The archive holds each configured path relative to `/` (for example
 `restore/etc/letsencrypt/`), plus `restore/offsite-backup-dump/` with
 whatever the pre-backup command wrote (for example a database dump).

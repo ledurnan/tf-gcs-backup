@@ -3,8 +3,13 @@
 age and age-keygen are the real tools, behind wrappers that log every
 argument and environment variable they are given, so a test can check the
 private key never reached either.
+
+The swap guard reads fake /proc and /sys trees (ISSUE_AGE_KEY_TEST_ROOT),
+and systemd-run is a fake on PATH, so nothing here needs systemd. One
+test uses the real systemd-run where it works.
 """
 
+import contextlib
 import os
 import pty
 import re
@@ -16,6 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
+from test_swap_guard import fake_root
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "issue-age-key"
@@ -36,6 +42,18 @@ if [ -n "${{SLOW_KEYGEN:-}}" ] && [ "$1" = -o ]; then touch "$SLOW_KEYGEN"; slee
 exec {real} "$@"
 """
 
+# Logs its arguments; fails like a machine without a user session, or runs
+# the command after "--" with the guard reading SYSTEMD_RUN_ROOT, as if in
+# a guarded scope.
+FAKE_SYSTEMD_RUN = """#!/bin/bash
+printf '%s\\n' "$*" >>"$SYSTEMD_RUN_LOG"
+if [ -n "${SYSTEMD_RUN_FAIL:-}" ]; then echo "Failed to connect to bus: No medium found" >&2; exit 1; fi
+while [ "$1" != -- ]; do shift; done
+shift
+if [ -n "${SYSTEMD_RUN_ROOT:-}" ]; then export ISSUE_AGE_KEY_TEST_ROOT="$SYSTEMD_RUN_ROOT"; fi
+exec "$@"
+"""
+
 
 @pytest.fixture
 def ctx(tmp_path):
@@ -48,17 +66,24 @@ def ctx(tmp_path):
         wrapper = bin_dir / tool
         wrapper.write_text(WRAPPER.format(real=shutil.which(tool)))
         wrapper.chmod(0o755)
+    systemd_run = bin_dir / "systemd-run"
+    systemd_run.write_text(FAKE_SYSTEMD_RUN)
+    systemd_run.chmod(0o755)
     work = tmp_path / "work"
     work.mkdir()
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ISSUE_AGE_KEY_IN_SCOPE")}
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["WRAP_LOG"] = str(tmp_path / "wrap.log")
+    # Already in a cgroup that may not swap, unless a test says otherwise.
+    env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(tmp_path / "guarded"))
+    env["SYSTEMD_RUN_LOG"] = str(tmp_path / "systemd-run.log")
 
     class Ctx:
         pass
 
     c = Ctx()
     c.tmp, c.work, c.env, c.log = tmp_path, work, env, tmp_path / "wrap.log"
+    c.systemd_run_log = tmp_path / "systemd-run.log"
     c.args = ["--name", "operator", "--work-dir", str(work), "--allow-disk-work-dir"]
     return c
 
@@ -105,6 +130,9 @@ class Term:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and self._read(deadline - time.monotonic()):
             pass
+        if time.monotonic() >= deadline:  # still running, waiting for input it won't get: fail, don't hang
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self.pid, signal.SIGKILL)
         _, status = os.waitpid(self.pid, 0)
         os.close(self.fd)
         self.rc = os.waitstatus_to_exitcode(status)
@@ -412,3 +440,166 @@ def test_a_work_directory_that_cant_be_removed_exits_3_and_names_it(ctx):
     assert list(work.iterdir()) == []  # its files were still overwritten and removed
     work.rmdir()
     assert_clean(ctx, term, secret)
+
+
+# --- The swap guard --------------------------------------------------------
+
+
+def issue(ctx, term):
+    """Take a run that has shown the key through to issued."""
+    _, secret = shown(term)
+    term.send("\n")
+    term.expect(PROMPT)
+    term.send(secret + "\n")
+    assert term.finish() == 0
+    assert b"the operator key is issued" in term.normal_screen()
+    assert_clean(ctx, term, secret)
+    return secret
+
+
+def test_already_guarded_it_runs_as_it_is(ctx):
+    term = Term(ctx.args, ctx.env)
+    issue(ctx, term)
+    assert b"swap guard: on" in term.out
+    assert not ctx.systemd_run_log.exists()
+
+
+def test_unguarded_it_runs_itself_again_in_a_guarded_scope(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max", zswap="max"))
+    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope"))
+    term = Term(ctx.args, ctx.env)
+    issue(ctx, term)
+    assert b"swap guard: on" in term.out
+    probe, rerun = ctx.systemd_run_log.read_text().splitlines()
+    props = "--user --scope --quiet -p MemorySwapMax=0 -p MemoryZSwapMax=0 --"
+    assert probe == f"{props} true"
+    assert rerun.startswith(f"{props} ")
+    assert rerun.endswith(f"{SCRIPT} {' '.join(ctx.args)}")
+
+
+def test_a_scope_that_doesnt_stop_swap_fails(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
+    term = Term(ctx.args, ctx.env)
+    assert term.finish() == 1
+    assert b"the scope doesn't stop swap" in term.out
+    assert b"the operator key was NOT issued" in term.out
+    assert ALT_ON not in term.out
+    assert list(ctx.work.iterdir()) == []
+
+
+def test_no_guard_fails_closed(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max", swaps=["/dev/zram0 partition"]))
+    ctx.env["SYSTEMD_RUN_FAIL"] = "1"
+    term = Term(ctx.args, ctx.env)
+    assert term.finish() == 1
+    out = term.out.decode()
+    assert "refusing to run: the key could be written to swap" in out
+    assert "Failed to connect to bus" in out
+    assert "--allow-swap" in out
+    assert "the operator key was NOT issued" in out
+    assert ALT_ON not in term.out  # no key was generated or shown
+    assert list(ctx.work.iterdir()) == []
+    assert not ctx.log.exists()  # age-keygen never ran
+
+
+def test_no_systemd_run_fails_closed(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
+    (ctx.tmp / "bin" / "systemd-run").unlink()
+    path = [d for d in ctx.env["PATH"].split(":") if not (Path(d) / "systemd-run").exists()]
+    ctx.env["PATH"] = ":".join(path)
+    term = Term(ctx.args, ctx.env)
+    assert term.finish() == 1
+    assert b"systemd-run is not installed" in term.out
+    assert ALT_ON not in term.out
+
+
+def test_allow_swap_runs_unguarded_when_all_swap_is_zram(ctx):
+    root = fake_root(ctx.tmp / "open", swap="max", swaps=["/dev/zram0 partition", "/dev/zram1 partition"])
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(root)
+    ctx.env["SYSTEMD_RUN_FAIL"] = "1"
+    term = Term([*ctx.args, "--allow-swap"], ctx.env)
+    issue(ctx, term)
+    assert b"swap guard: OFF (--allow-swap)" in term.out
+
+
+def test_allow_swap_refuses_swap_that_could_reach_a_disk(ctx):
+    root = fake_root(ctx.tmp / "open", swap="max", swaps=["/dev/zram0 partition", "/no/such/swap.img file"])
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(root)
+    ctx.env["SYSTEMD_RUN_FAIL"] = "1"
+    term = Term([*ctx.args, "--allow-swap"], ctx.env)
+    assert term.finish() == 1
+    out = term.out.decode()
+    assert "--allow-swap refused" in out
+    assert "/no/such/swap.img: can't find its device" in out
+    assert "/dev/zram0" not in out
+    assert ALT_ON not in term.out
+
+
+def test_allow_swap_is_ignored_when_the_guard_works(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max", swaps=["/swap.img file"]))
+    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope"))
+    term = Term([*ctx.args, "--allow-swap"], ctx.env)
+    issue(ctx, term)
+    assert b"swap guard: on" in term.out
+    assert b"OFF" not in term.out
+
+
+def check_guard(ctx):
+    """--check-guard, without a terminal, inside Claude Code."""
+    env = {**ctx.env, "CLAUDECODE": "1"}
+    result = subprocess.run([str(SCRIPT), "--check-guard"], capture_output=True, text=True, env=env, check=False)
+    return result.returncode, result.stdout + result.stderr
+
+
+def test_check_guard_when_guarded(ctx):
+    rc, out = check_guard(ctx)
+    assert rc == 0
+    assert "protected now: yes" in out
+    assert "issuing a key would run here, guarded" in out
+    assert "PRIVATE" not in out and "AGE-SECRET" not in out
+
+
+def test_check_guard_tries_a_guarded_scope(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
+    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope"))
+    rc, out = check_guard(ctx)
+    assert rc == 0
+    assert "protected now: no. this process's cgroup may swap (memory.swap.max is max)" in out
+    assert "  protected now: yes" in out
+    assert "would run itself again inside such a scope, guarded" in out
+
+
+def test_check_guard_without_a_guard(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max", swaps=["/no/such/swap file"]))
+    ctx.env["SYSTEMD_RUN_FAIL"] = "1"
+    rc, out = check_guard(ctx)
+    assert rc == 1
+    assert "a guarded scope can't be created: Failed to connect to bus" in out
+    assert "would refuse, even with --allow-swap" in out
+    assert "/no/such/swap" in out
+
+
+def real_scope_problem():
+    import _swapguard
+
+    return _swapguard.probe_scope()
+
+
+@pytest.mark.skipif(bool(real_scope_problem()), reason="no systemd user session with the memory controller")
+def test_the_real_systemd_run_guards_the_run(ctx):
+    """Where systemd can create the scope: the run really ends up in a
+    cgroup with swap off, on the same terminal and process."""
+    for name in ("ISSUE_AGE_KEY_TEST_ROOT", "SYSTEMD_RUN_LOG"):
+        del ctx.env[name]
+    (ctx.tmp / "bin" / "systemd-run").unlink()
+    term = Term(ctx.args, ctx.env)
+    shown(term)
+    cgroup = Path(f"/proc/{term.pid}/cgroup").read_text().strip().split("::")[1]
+    cg_dir = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
+    assert (cg_dir / "memory.swap.max").read_text().strip() == "0"
+    if (cg_dir / "memory.zswap.max").exists():
+        assert (cg_dir / "memory.zswap.max").read_text().strip() == "0"
+    os.kill(term.pid, signal.SIGTERM)
+    assert term.finish() == 130
+    assert b"swap guard: on" in term.out
+    assert_clean(ctx, term)
