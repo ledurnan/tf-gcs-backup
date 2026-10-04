@@ -187,7 +187,8 @@ def test_recovery_key_says_offline_and_gives_a_keep_until_date(ctx):
     term.expect(PROMPT)
     term.send(secret + "\n")
     assert term.finish() == 0
-    assert re.search(rb"365 \+ 2 = 367 days: if it stopped today, until \d{4}-\d\d-\d\d", term.out)
+    keep = rb"365 \+ 2 = 367 days after the hosts stop using it \(if they stopped today, until \d{4}-\d\d-\d\d\)"
+    assert re.search(keep, term.out)
     assert_clean(ctx, term, secret)
 
 

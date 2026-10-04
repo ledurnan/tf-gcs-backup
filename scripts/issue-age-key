@@ -294,14 +294,17 @@ class IssueAgeKey(Job):
         info(f"the {self.name} key is issued. Its public key:")
         print(f"\n  {self.public}\n", flush=True)
         info("next: add it to offsite_backup_age_recipients on every host, alongside the other key, and re-deploy.")
-        keep = "the longest retain_days of any tier plus lifecycle_slack_days"
+        keep = "the longest retain_days of any tier plus lifecycle_slack_days, after the hosts stop using it"
         if o["retain_days"] is not None:
             days = o["retain_days"] + o["slack_days"]
             until = datetime.date.today() + datetime.timedelta(days=days)
-            keep = f"{o['retain_days']} + {o['slack_days']} = {days} days: if it stopped today, until {until}"
+            keep = (
+                f"{o['retain_days']} + {o['slack_days']} = {days} days after the hosts stop using it "
+                f"(if they stopped today, until {until})"
+            )
         info(
             "when this key is rotated out, keep its private key until the last backup encrypted to it "
-            f"has expired: {keep} after the hosts stop using it."
+            f"has expired: {keep}."
         )
 
     def on_failure(self):
