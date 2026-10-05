@@ -33,7 +33,7 @@ Usage:
   issue-age-key --name operator|recovery [--retain-days <days>]
                 [--slack-days <days>] [--work-dir <dir>]
                 [--allow-disk-work-dir] [--allow-swap]
-  issue-age-key --check-guard
+  issue-age-key --check-guard [--verbose]
 
   --name               which key this is: operator (everyday, kept in
                        your password manager) or recovery (kept offline)
@@ -51,9 +51,11 @@ Usage:
                        is zram or dm-crypt (or there is none). Ignored
                        when the guard works
   --check-guard        only report whether the key would be kept out of
-                       swap, and how, then exit: 0 it would, 1 it
-                       wouldn't. Shows no key, so it runs anywhere,
-                       Claude Code included
+                       swap, then exit: 0 it would, 1 it wouldn't. The
+                       first line is the verdict, OK or NOT PROTECTED,
+                       then what to do if anything, then How. Shows no
+                       key, so it runs anywhere, Claude Code included
+  --verbose            with --check-guard: add the cgroups it checked
 
 The swap guard needs cgroup v2 with the memory controller delegated to
 the systemd user manager (the default on current distributions), and
@@ -110,6 +112,7 @@ PUBLIC_RE = re.compile(r"age1[0-9a-z]+")
 PR_SET_DUMPABLE = 4
 # Set on the run inside the guarded scope, so it doesn't try again.
 IN_SCOPE = "ISSUE_AGE_KEY_IN_SCOPE"
+SCOPE = "a systemd user scope with swap off"
 # Tests only: read /proc and /sys under this directory instead of /.
 TEST_ROOT = "ISSUE_AGE_KEY_TEST_ROOT"
 
@@ -130,6 +133,7 @@ def parse_args(argv):
         "allow_disk": False,
         "allow_swap": False,
         "check_guard": False,
+        "verbose": False,
     }
     args = list(argv)
     while args:
@@ -137,7 +141,7 @@ def parse_args(argv):
         if arg in ("-h", "--help"):
             print(__doc__.strip())
             sys.exit(0)
-        if arg in ("--allow-disk-work-dir", "--allow-swap", "--check-guard"):
+        if arg in ("--allow-disk-work-dir", "--allow-swap", "--check-guard", "--verbose"):
             opts[{"--allow-disk-work-dir": "allow_disk"}.get(arg, arg[2:].replace("-", "_"))] = True
             continue
         if arg not in ("--name", "--retain-days", "--slack-days", "--work-dir"):
@@ -157,6 +161,8 @@ def parse_args(argv):
             opts[arg[2:].replace("-", "_")] = int(value)
     if opts["check_guard"]:
         return opts
+    if opts["verbose"]:
+        raise Usage("--verbose goes with --check-guard")
     if not opts["name"]:
         raise Usage("--name is required: operator or recovery")
     return opts
@@ -204,6 +210,10 @@ class AltScreen:
 
 # --- The swap guard --------------------------------------------------------
 
+# --check-guard's first line.
+OK = "OK: a key issued here would be kept out of swap."
+NOT_PROTECTED = "NOT PROTECTED: a key issued here could be written to swap, so issue-age-key would refuse to run"
+
 
 def guard_root():
     return os.environ.get(TEST_ROOT) or "/"
@@ -232,12 +242,14 @@ def guard(argv, allow_swap):
         warn(f"{TEST_ROOT} is set: the swap guard is reading test files under {root}")
     now = _swapguard.status(root)
     if now.protected:
-        info(f"swap guard: on. {now.reason}.")
+        how = f"it runs in {SCOPE}" if os.environ.get(IN_SCOPE) else "swap is already off here"
+        info(f"swap guard: on. The key is kept out of swap: {how} ({now.reason}).")
         return
     if os.environ.get(IN_SCOPE):
         raise Failed(
-            f"ran itself again in a scope with swap off, but the scope doesn't stop swap: {now.reason}",
-            "Run issue-age-key --check-guard to see why.",
+            "refusing to run: the key could be written to swap. It ran itself again in "
+            f"{SCOPE}, but the scope doesn't stop swap: {now.reason}",
+            "Run issue-age-key --check-guard --verbose to see why.",
         )
     problem = _swapguard.probe_scope()
     if problem is None:
@@ -261,48 +273,95 @@ def guard(argv, allow_swap):
             *unsafe,
             "Turn them off (sudo swapoff <device>) or encrypt them, or make the guard work.",
         )
-    warn(f"swap guard: OFF (--allow-swap). {why}")
-    warn("every active swap device is zram or dm-crypt, so swap can't write the key to a disk in plaintext.")
+    warn(
+        "swap guard: off (--allow-swap), but swap can't write the key to a disk in plaintext: "
+        "every active swap device is zram or dm-crypt, or there is none."
+    )
+    detail(f"  Why the guard is off: {why}.")
 
 
-def check_guard():
-    """--check-guard: report whether issuing would keep the key out of
-    swap, and how. 0 it would, 1 it wouldn't."""
+def scope_report():
+    """--check-guard inside the guarded scope, for the run outside it:
+    the scope's reason and cgroup, one per line."""
+    now = _swapguard.status(guard_root())
+    print(now.reason)
+    print(now.cgroup)
+    return EXIT_OK if now.protected else EXIT_FAILED
+
+
+def check_guard(verbose):
+    """--check-guard: whether issuing would keep the key out of swap
+    (the first line), how (the second), then what to do about it or,
+    with --verbose, the cgroups. 0 it would, 1 it wouldn't."""
+    if os.environ.get(IN_SCOPE):
+        return scope_report()
     root = guard_root()
     now = _swapguard.status(root)
-    print(f"protected now: {'yes' if now.protected else 'no'}. {now.reason}.")
-    if now.cgroup:
-        print(f"cgroup: {now.cgroup}")
+    # The process is this terminal's: say so.
+    now.reason = now.reason.replace("this process's", "this terminal's")
+    details = [f"this terminal's cgroup: {now.cgroup or 'unknown'}"]
     if now.protected:
-        print("issuing a key would run here, guarded.")
-        return EXIT_OK
-    if os.environ.get(IN_SCOPE):
-        return EXIT_FAILED
-    problem = _swapguard.probe_scope()
-    if problem is None:
-        # Ask the same question from inside a guarded scope.
-        inner = subprocess.run(
-            rerun_command(["--check-guard"]),
-            capture_output=True,
-            text=True,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            env={**os.environ, IN_SCOPE: "1"},
+        print(OK)
+        print(f"How: {now.reason}, so issue-age-key runs as it is.")
+        rc = EXIT_OK
+    elif (problem := _swapguard.probe_scope()) is None:
+        rc = check_scope(now, details)
+    else:
+        rc = check_allow_swap(root, now, problem)
+    if verbose:
+        print("Details:")
+        print(prefixed("  ", *details))
+    return rc
+
+
+def check_scope(now, details):
+    """Ask the same question from inside a guarded scope, as issuing a key
+    would run there."""
+    inner = subprocess.run(
+        rerun_command(["--check-guard"]),
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, IN_SCOPE: "1"},
+    )
+    lines = inner.stdout.splitlines()
+    if inner.returncode in (EXIT_OK, EXIT_FAILED) and len(lines) == 2:
+        reason, cgroup = lines
+    else:
+        reason, cgroup = prefixed("", inner.stdout, inner.stderr) or f"exited {inner.returncode}", ""
+    details.append(f"the guarded scope's cgroup: {cgroup or 'unknown'}")
+    details.append(f"the scope: systemd-run --user --scope {' '.join(f'-p {p}' for p in _swapguard.PROPERTIES)}")
+    if inner.returncode == EXIT_OK:
+        print(OK)
+        print(
+            f"How: {now.reason}, so issue-age-key re-runs itself in {SCOPE} "
+            "(checked inside one: memory.swap.max 0, memory.zswap.max 0)."
         )
-        print("inside a guarded scope (systemd-run --user --scope -p MemorySwapMax=0 -p MemoryZSwapMax=0):")
-        print(prefixed("  ", inner.stdout, inner.stderr))
-        if inner.returncode == 0:
-            print("issuing a key would run itself again inside such a scope, guarded.")
-            return EXIT_OK
-        print("issuing a key would refuse: the scope doesn't stop swap.")
-        return EXIT_FAILED
-    print(f"a guarded scope can't be created: {problem}")
+        return EXIT_OK
+    print(f"{NOT_PROTECTED}.")
+    print("To fix: see why the scope keeps swap on (issue-age-key --check-guard --verbose names its cgroup).")
+    print(f"How: {now.reason}, and {SCOPE} doesn't stop swap here: {reason}.")
+    return EXIT_FAILED
+
+
+def check_allow_swap(root, now, problem):
+    """No guarded scope: whether --allow-swap would be accepted."""
     unsafe = unsafe_swap_lines(root)
     if unsafe:
-        print("issuing a key would refuse, even with --allow-swap. Swap that could leak the key:")
+        print(f"{NOT_PROTECTED}, even with --allow-swap.")
+        print(
+            "To fix: make the guard work (a systemd user session with the memory controller delegated), "
+            "or turn off or encrypt this swap:"
+        )
         print(prefixed("  ", *unsafe))
     else:
-        print("issuing a key would refuse unless given --allow-swap: every active swap device is zram or encrypted.")
+        print(f"{NOT_PROTECTED} unless given --allow-swap.")
+        print(
+            "--allow-swap is safe here: every active swap device is zram or dm-crypt (or there is none), "
+            "so swap can't write the key to a disk in plaintext."
+        )
+    print(f"How: {now.reason}, and systemd can't create {SCOPE}: {problem}.")
     return EXIT_FAILED
 
 
@@ -465,7 +524,7 @@ def main(argv):
     except Usage as e:
         return usage_error(e)
     if opts["check_guard"]:
-        return check_guard()
+        return check_guard(opts["verbose"])
     return run_job(IssueAgeKey(opts, argv))
 
 

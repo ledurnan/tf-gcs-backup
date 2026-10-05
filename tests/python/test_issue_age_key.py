@@ -460,7 +460,7 @@ def issue(ctx, term):
 def test_already_guarded_it_runs_as_it_is(ctx):
     term = Term(ctx.args, ctx.env)
     issue(ctx, term)
-    assert b"swap guard: on" in term.out
+    assert b"swap guard: on. The key is kept out of swap: swap is already off here" in term.out
     assert not ctx.systemd_run_log.exists()
 
 
@@ -469,7 +469,8 @@ def test_unguarded_it_runs_itself_again_in_a_guarded_scope(ctx):
     ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope"))
     term = Term(ctx.args, ctx.env)
     issue(ctx, term)
-    assert b"swap guard: on" in term.out
+    assert b"swap guard: on. The key is kept out of swap: it runs in a systemd user scope" in term.out
+    assert b"may swap" not in term.out  # nothing alarming when all is well
     probe, rerun = ctx.systemd_run_log.read_text().splitlines()
     props = "--user --scope --quiet -p MemorySwapMax=0 -p MemoryZSwapMax=0 --"
     assert probe == f"{props} true"
@@ -481,6 +482,7 @@ def test_a_scope_that_doesnt_stop_swap_fails(ctx):
     ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
     term = Term(ctx.args, ctx.env)
     assert term.finish() == 1
+    assert b"refusing to run: the key could be written to swap" in term.out
     assert b"the scope doesn't stop swap" in term.out
     assert b"the operator key was NOT issued" in term.out
     assert ALT_ON not in term.out
@@ -519,7 +521,7 @@ def test_allow_swap_runs_unguarded_when_all_swap_is_zram(ctx):
     ctx.env["SYSTEMD_RUN_FAIL"] = "1"
     term = Term([*ctx.args, "--allow-swap"], ctx.env)
     issue(ctx, term)
-    assert b"swap guard: OFF (--allow-swap)" in term.out
+    assert b"swap guard: off (--allow-swap), but swap can't write the key to a disk in plaintext" in term.out
 
 
 def test_allow_swap_refuses_swap_that_could_reach_a_disk(ctx):
@@ -541,32 +543,70 @@ def test_allow_swap_is_ignored_when_the_guard_works(ctx):
     term = Term([*ctx.args, "--allow-swap"], ctx.env)
     issue(ctx, term)
     assert b"swap guard: on" in term.out
-    assert b"OFF" not in term.out
+    assert b"swap guard: off" not in term.out
 
 
-def check_guard(ctx):
+def check_guard(ctx, *args):
     """--check-guard, without a terminal, inside Claude Code."""
     env = {**ctx.env, "CLAUDECODE": "1"}
-    result = subprocess.run([str(SCRIPT), "--check-guard"], capture_output=True, text=True, env=env, check=False)
+    result = subprocess.run([str(SCRIPT), "--check-guard", *args], capture_output=True, text=True, env=env, check=False)
     return result.returncode, result.stdout + result.stderr
 
 
 def test_check_guard_when_guarded(ctx):
     rc, out = check_guard(ctx)
     assert rc == 0
-    assert "protected now: yes" in out
-    assert "issuing a key would run here, guarded" in out
+    lines = out.splitlines()
+    assert lines[0] == "OK: a key issued here would be kept out of swap."
+    assert lines[1].startswith("How: swap is off for this terminal's cgroup")
+    assert lines[1].endswith("so issue-age-key runs as it is.")
+    assert len(lines) == 2
     assert "PRIVATE" not in out and "AGE-SECRET" not in out
 
 
 def test_check_guard_tries_a_guarded_scope(ctx):
+    """The usual desktop: the terminal may swap, the scope doesn't. The
+    verdict first, nothing alarming, the cgroups only with --verbose."""
     ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
-    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope"))
+    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope", cgroup="0::/user.slice/run-r1.scope"))
     rc, out = check_guard(ctx)
     assert rc == 0
-    assert "protected now: no. this process's cgroup may swap (memory.swap.max is max)" in out
-    assert "  protected now: yes" in out
-    assert "would run itself again inside such a scope, guarded" in out
+    assert out.splitlines() == [
+        "OK: a key issued here would be kept out of swap.",
+        "How: this terminal's cgroup may swap (memory.swap.max is max), so issue-age-key re-runs itself "
+        "in a systemd user scope with swap off (checked inside one: memory.swap.max 0, memory.zswap.max 0).",
+    ]
+    rc, out = check_guard(ctx, "--verbose")
+    assert rc == 0
+    assert out.splitlines()[0] == "OK: a key issued here would be kept out of swap."
+    assert "  this terminal's cgroup: /user.slice/test.scope" in out
+    assert "  the guarded scope's cgroup: /user.slice/run-r1.scope" in out
+
+
+def test_check_guard_when_the_scope_doesnt_stop_swap(ctx):
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(fake_root(ctx.tmp / "open", swap="max"))
+    ctx.env["SYSTEMD_RUN_ROOT"] = str(fake_root(ctx.tmp / "scope", swap="max"))
+    rc, out = check_guard(ctx)
+    assert rc == 1
+    lines = out.splitlines()
+    assert lines[0].startswith("NOT PROTECTED: a key issued here could be written to swap")
+    assert "doesn't stop swap here: this process's cgroup may swap (memory.swap.max is max)" in lines[-1]
+    assert lines[-1].startswith("How: ")
+
+
+def test_check_guard_with_allow_swap_safe(ctx):
+    root = fake_root(ctx.tmp / "open", swap="max", swaps=["/dev/zram0 partition"])
+    ctx.env["ISSUE_AGE_KEY_TEST_ROOT"] = str(root)
+    ctx.env["SYSTEMD_RUN_FAIL"] = "1"
+    rc, out = check_guard(ctx)
+    assert rc == 1
+    lines = out.splitlines()
+    assert lines[0].startswith("NOT PROTECTED: ")
+    assert lines[0].endswith("would refuse to run unless given --allow-swap.")
+    assert lines[1].startswith("--allow-swap is safe here: every active swap device is zram or dm-crypt")
+    assert lines[2].startswith("How: this terminal's cgroup may swap")
+    assert "systemd can't create a systemd user scope with swap off: Failed to connect to bus" in lines[2]
+    assert len(lines) == 3
 
 
 def test_check_guard_without_a_guard(ctx):
@@ -574,9 +614,20 @@ def test_check_guard_without_a_guard(ctx):
     ctx.env["SYSTEMD_RUN_FAIL"] = "1"
     rc, out = check_guard(ctx)
     assert rc == 1
-    assert "a guarded scope can't be created: Failed to connect to bus" in out
-    assert "would refuse, even with --allow-swap" in out
-    assert "/no/such/swap" in out
+    lines = out.splitlines()
+    assert lines[0].startswith("NOT PROTECTED: a key issued here could be written to swap")
+    assert lines[0].endswith("even with --allow-swap.")
+    assert lines[1].startswith("To fix: ")
+    assert any(line.startswith("  /no/such/swap: can't find its device") for line in lines)
+    assert "Failed to connect to bus" in lines[-1]
+
+
+def test_verbose_only_goes_with_check_guard(ctx):
+    result = subprocess.run(
+        [str(SCRIPT), *ctx.args, "--verbose"], capture_output=True, text=True, env=ctx.env, check=False
+    )
+    assert result.returncode == 2
+    assert "--verbose goes with --check-guard" in result.stderr
 
 
 def real_scope_problem():
