@@ -96,7 +96,7 @@ def load_script():
 
 
 def test_the_rerun_is_the_same_interpreter_script_and_arguments():
-    argv = ["--name", "recovery", "--work-dir", "/dev/shm", "--retain-days", "35"]
+    argv = ["--name", "recovery", "--work-dir", "/dev/shm", "--allow-swap"]
     command = load_script().rerun_command(argv)
     assert command == [*_swapguard.scope_command([]), sys.executable, str(SCRIPT), *argv]
 
