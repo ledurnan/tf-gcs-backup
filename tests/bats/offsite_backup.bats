@@ -229,6 +229,16 @@ EOF
   [ ! -e "$T/state/last-error" ]
 }
 
+@test "re-run: a same-day re-run doesn't print gcloud's delete-permission error" {
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  run_backup "$WEDNESDAY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already stored today"* ]]
+  [[ "$output" != *"ERROR:"* ]]
+  [[ "$output" != *"storage.objects.delete"* ]]
+}
+
 @test "re-run: a retry after a part-failed run writes the tiers still missing" {
   # The daily upload of this run's day happened; weekly and monthly didn't.
   mkdir -p "$FAKE_GCS_DIR/example-daily/host-a"
@@ -261,6 +271,8 @@ EOF
   [ "$status" -ne 0 ]
   grep -q "upload of gs://example-daily/host-a/2026-06-01.tar.age failed: .*Connection reset by peer" "$T/state/last-error"
   grep -q "upload of gs://example-monthly/" "$T/state/last-error"
+  # gcloud's own output is still shown in full.
+  [[ "$output" == *"ERROR: Connection reset by peer"* ]]
 }
 
 @test "contract: a tier with no bucket stops the run before any upload" {
