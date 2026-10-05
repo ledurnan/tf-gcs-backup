@@ -42,10 +42,19 @@ dm-crypt. A device it can't trace to dm-crypt, such as a swap file on
 btrfs, counts as unencrypted. With no swap at all, `--allow-swap` is
 accepted. When the guard works, `--allow-swap` is ignored.
 
-`--check-guard` makes no key. It reports whether this process is guarded,
+`--check-guard` makes no key. It checks whether this process is guarded,
 whether a guarded scope can be created (it starts one and asks again from
-inside), and what `--allow-swap` would find. It exits 0 when issuing a
-key would run guarded and 1 when it would refuse. It runs anywhere, Claude
+inside), and what `--allow-swap` would find. Its first line is the
+verdict, `OK` or `NOT PROTECTED`, followed by what to do, if anything,
+and a `How:` line. On a typical desktop, where the terminal may swap:
+
+```text
+OK: a key issued here would be kept out of swap.
+How: this terminal's cgroup may swap (memory.swap.max is max), so issue-age-key re-runs itself in a systemd user scope with swap off (checked inside one: memory.swap.max 0, memory.zswap.max 0).
+```
+
+`--verbose` adds the cgroups it checked. It exits 0 when issuing a key
+would run guarded and 1 when it would refuse. It runs anywhere, Claude
 Code included.
 
 ## What it needs
