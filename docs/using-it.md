@@ -130,8 +130,8 @@ each with [`scripts/issue-age-key`](../scripts/issue-age-key), in your
 own terminal:
 
 ```bash
-scripts/issue-age-key --name operator --retain-days 365
-scripts/issue-age-key --name recovery --retain-days 365
+scripts/issue-age-key --name operator
+scripts/issue-age-key --name recovery
 ```
 
 It shows the private key once, on a screen that is cleared afterwards,
@@ -149,10 +149,27 @@ Give the hosts the **public** keys only, in
 backed-up host. Anyone with either can read every backup; losing both
 loses every backup.
 
-When you replace a key, keep the old private key until the last backup
-encrypted to it has expired: the longest `retain_days` plus
-`lifecycle_slack_days` after the hosts stop using it. `--retain-days`
-makes it print that date.
+### Rotating a key
+
+Every backup stays encrypted to the keys it was made with, so a key
+retired from the hosts is still the only way into the backups made
+before. To replace one:
+
+1. Issue the new key with `scripts/issue-age-key`, as above.
+2. Add its public key to `offsite_backup_age_recipients` and re-deploy.
+   From the next run, backups are encrypted to it.
+3. Remove the old public key from `offsite_backup_age_recipients` and
+   re-deploy. Write down the date of this re-deploy: from it, the hosts
+   stop encrypting to the old key.
+4. Keep the old **private** key until the last backup encrypted to it
+   has been deleted: the longest `retain_days` of any tier that used it,
+   plus `lifecycle_slack_days`, counted from the re-deploy in step 3.
+   Write that date down next to the key.
+5. Before that date, don't destroy it. After it, destroy it.
+
+For example, with tiers of 7, 28 and 365 days and a slack of 1, a key
+retired by a re-deploy on 1 March is kept for 365 + 1 = 366 days after
+it, into March of the following year.
 
 ## 5. The sending side
 

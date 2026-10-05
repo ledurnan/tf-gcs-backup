@@ -206,8 +206,8 @@ def test_issues_a_key_proved_saved(ctx):
     assert dec.stdout == b"backup"
 
 
-def test_recovery_key_says_offline_and_gives_a_keep_until_date(ctx):
-    args = ["--name", "recovery", "--retain-days", "365", "--slack-days", "2", *ctx.args[2:]]
+def test_recovery_key_says_offline(ctx):
+    args = ["--name", "recovery", *ctx.args[2:]]
     term = Term(args, ctx.env)
     term.expect(rb"OFFLINE")
     _, secret = shown(term)
@@ -215,8 +215,9 @@ def test_recovery_key_says_offline_and_gives_a_keep_until_date(ctx):
     term.expect(PROMPT)
     term.send(secret + "\n")
     assert term.finish() == 0
-    keep = rb"365 \+ 2 = 367 days after the hosts stop using it \(if they stopped today, until \d{4}-\d\d-\d\d\)"
-    assert re.search(keep, term.out)
+    assert b"offsite_backup_age_recipients" in term.out
+    # How long to keep a rotated-out key is in the docs, not printed here.
+    assert b"rotated out" not in term.out
     assert_clean(ctx, term, secret)
 
 
@@ -330,7 +331,10 @@ def test_refuses_a_work_directory_on_disk(ctx):
     [
         ([], b"--name is required"),
         (["--name", "admin"], b"--name must be operator or recovery"),
-        (["--name", "operator", "--retain-days", "a year"], b"must be a whole number of days"),
+        (["--name", "operator", "--retain-days", "365"], b"--retain-days was removed"),
+        (["--name", "operator", "--slack-days", "1"], b"--slack-days was removed"),
+        (["--name", "operator", "--retain-days=365"], b"--retain-days was removed"),
+        (["--retain-days"], b'docs/using-it.md, "Rotating a key"'),
         (["--name"], b"--name needs a value"),
         (["--name", "operator", "--bogus"], b"unknown argument: --bogus"),
     ],

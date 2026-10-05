@@ -30,18 +30,12 @@ exit, including on Ctrl-C. If the run fails or is interrupted before the
 key is proved saved, the key is NOT issued: don't use its public key.
 
 Usage:
-  issue-age-key --name operator|recovery [--retain-days <days>]
-                [--slack-days <days>] [--work-dir <dir>]
+  issue-age-key --name operator|recovery [--work-dir <dir>]
                 [--allow-disk-work-dir] [--allow-swap]
   issue-age-key --check-guard [--verbose]
 
   --name               which key this is: operator (everyday, kept in
                        your password manager) or recovery (kept offline)
-  --retain-days        the longest retain_days of any tier encrypting to
-                       this key. Given, the reminder of how long to keep
-                       a rotated key gives a date
-  --slack-days         lifecycle_slack_days, the same as the hosts'.
-                       Default 1, the module's default
   --work-dir           where the key lives while the script runs.
                        Default $XDG_RUNTIME_DIR, else /dev/shm. Must be
                        tmpfs or ramfs, so nothing reaches a disk
@@ -63,6 +57,9 @@ systemd 253 or later for MemoryZSwapMax. It doesn't protect against root,
 against hibernation (which writes all memory to disk), or against a
 compromised machine.
 
+How long to keep a key's private key once it is rotated out is in
+docs/using-it.md, "Rotating a key".
+
 Exit status: 0 issued; 1 failed, the key was not issued; 2 usage error;
 3 the work directory couldn't be removed: the message names the path to
 shred by hand.
@@ -72,7 +69,6 @@ Needs Python 3.10 or later, age and age-keygen.
 
 import contextlib
 import ctypes
-import datetime
 import getpass
 import os
 import re
@@ -116,6 +112,10 @@ SCOPE = "a systemd user scope with swap off"
 # Tests only: read /proc and /sys under this directory instead of /.
 TEST_ROOT = "ISSUE_AGE_KEY_TEST_ROOT"
 
+# Removed flags, and what to read instead.
+REMOVED = ("--retain-days", "--slack-days")
+ROTATION_DOC = 'docs/using-it.md, "Rotating a key"'
+
 # The alternate screen: entered and cleared, then cleared and left.
 ALT_ON = "\x1b[?1049h\x1b[H\x1b[2J"
 ALT_OFF = "\x1b[H\x1b[2J\x1b[3J\x1b[?1049l"
@@ -127,8 +127,6 @@ ALT_OFF = "\x1b[H\x1b[2J\x1b[3J\x1b[?1049l"
 def parse_args(argv):
     opts = {
         "name": "",
-        "retain_days": None,
-        "slack_days": 1,
         "work_parent": "",
         "allow_disk": False,
         "allow_swap": False,
@@ -144,7 +142,12 @@ def parse_args(argv):
         if arg in ("--allow-disk-work-dir", "--allow-swap", "--check-guard", "--verbose"):
             opts[{"--allow-disk-work-dir": "allow_disk"}.get(arg, arg[2:].replace("-", "_"))] = True
             continue
-        if arg not in ("--name", "--retain-days", "--slack-days", "--work-dir"):
+        if arg in REMOVED or arg.split("=", 1)[0] in REMOVED:
+            raise Usage(
+                f"{arg.split('=', 1)[0]} was removed: it didn't change the key. How long to keep a "
+                f"rotated-out key's private key is now in {ROTATION_DOC}"
+            )
+        if arg not in ("--name", "--work-dir"):
             raise Usage(f"unknown argument: {arg}")
         if not args or not args[0]:
             raise Usage(f"{arg} needs a value")
@@ -153,12 +156,8 @@ def parse_args(argv):
             if value not in NAMES:
                 raise Usage(f"--name must be operator or recovery: got '{value}'")
             opts["name"] = value
-        elif arg == "--work-dir":
-            opts["work_parent"] = value
         else:
-            if not value.isdigit():
-                raise Usage(f"{arg} must be a whole number of days: got '{value}'")
-            opts[arg[2:].replace("-", "_")] = int(value)
+            opts["work_parent"] = value
     if opts["check_guard"]:
         return opts
     if opts["verbose"]:
@@ -493,22 +492,9 @@ class IssueAgeKey(Job):
         return None
 
     def report(self):
-        o = self.o
         info(f"the {self.name} key is issued. Its public key:")
         print(f"\n  {self.public}\n", flush=True)
         info("next: add it to offsite_backup_age_recipients on every host, alongside the other key, and re-deploy.")
-        keep = "the longest retain_days of any tier plus lifecycle_slack_days, after the hosts stop using it"
-        if o["retain_days"] is not None:
-            days = o["retain_days"] + o["slack_days"]
-            until = datetime.date.today() + datetime.timedelta(days=days)
-            keep = (
-                f"{o['retain_days']} + {o['slack_days']} = {days} days after the hosts stop using it "
-                f"(if they stopped today, until {until})"
-            )
-        info(
-            "when this key is rotated out, keep its private key until the last backup encrypted to it "
-            f"has expired: {keep}."
-        )
 
     def on_failure(self):
         if not self.public:
