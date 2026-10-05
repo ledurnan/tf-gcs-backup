@@ -311,8 +311,10 @@ kept=0
 upload() {
   local url="$1" out remote_size created
 
+  # gcloud's output is shown only when the upload really failed. On a
+  # same-day re-run it is the storage.objects.delete error explained
+  # above, and printing it would put that error in a healthy journal.
   if ! out="$(gcloud storage cp "$WORK/backup.tar.age" "$url" 2>&1)"; then
-    printf '%s\n' "$out" >&2
     if created="$(gcloud storage objects describe "$url" \
       --format='value(creation_time.date("%s"))' 2>/dev/null)" \
       && created="${created%%.*}" && [[ "$created" =~ ^[0-9]+$ ]]; then
@@ -320,10 +322,12 @@ upload() {
         log notice "${url} already stored today, at $(date -u -d "@$created" +%H:%M) UTC; kept, not overwritten"
         kept=$((kept + 1))
       else
+        printf '%s\n' "$out" >&2
         fail_tier "${url} already exists, created $(date -u -d "@$created" '+%Y-%m-%d %H:%M') UTC, before this run's day, so no run today wrote it. Nothing was overwritten. If this tier's name_format gives the same name on more than one due day, change it. Otherwise someone with a writer key may have taken the name: see docs/emergency.md. Never grant the writer delete"
       fi
       return
     fi
+    printf '%s\n' "$out" >&2
     fail_tier "upload of ${url} failed: $(gcloud_reason "$out")"
     return
   fi
