@@ -21,13 +21,13 @@ values, credentials and Terraform state.
 
 ```hcl
 module "writer_role" {
-  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.3.0"
+  source         = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.4.0"
   project        = "your-project-id"
   role_id_prefix = "yourorgHostA" # roles yourorgHostAWriter, yourorgHostAEmergency
 }
 
 module "host_a" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.3.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.4.0"
   project            = "your-project-id"
   location           = "europe-west2"
   bucket_name_prefix = "yourorg-backup-host-a" # buckets: <prefix>-<tier>
@@ -43,7 +43,7 @@ module "host_a" {
 ```yaml
 # requirements.yml
 collections:
-  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.3.0/ledurnan-gcs_backup-0.3.0.tar.gz
+  - name: https://github.com/ledurnan/tf-gcs-backup/releases/download/v0.4.0/ledurnan-gcs_backup-0.4.0.tar.gz
     type: url
 ```
 
