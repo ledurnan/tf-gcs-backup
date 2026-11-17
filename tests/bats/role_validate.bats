@@ -41,7 +41,10 @@ refused() {
 @test "refused: a bad tier name" { refused '{"offsite_backup_tiers": [{"name": "Daily Tier", "retain_days": 7, "when": "always"}]}'; }
 @test "refused: zero retention" { refused '{"offsite_backup_tiers": [{"name": "daily", "retain_days": 0, "when": "always"}]}'; }
 @test "refused: a bad schedule" { refused '{"offsite_backup_tiers": [{"name": "daily", "retain_days": 7, "when": "monthday:31"}]}'; }
-@test "refused: duplicate tiers" { refused '{"offsite_backup_tiers": [{"name": "daily", "retain_days": 7, "when": "always"}, {"name": "daily", "retain_days": 9, "when": "always"}]}'; }
+# Multi-line: bats 1.13 mis-parses a one-line test whose body holds "}, {".
+@test "refused: duplicate tiers" {
+  refused '{"offsite_backup_tiers": [{"name": "daily", "retain_days": 7, "when": "always"}, {"name": "daily", "retain_days": 9, "when": "always"}]}'
+}
 @test "refused: a name format with a space" { refused '{"offsite_backup_tiers": [{"name": "daily", "retain_days": 7, "when": "always", "name_format": "%Y %m"}]}'; }
 @test "refused: negative slack" { refused '{"offsite_backup_lifecycle_slack_days": -1}'; }
 @test "refused: a key that isn't JSON" { refused '{"offsite_backup_sa_key": "not json"}'; }

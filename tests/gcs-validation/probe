@@ -226,7 +226,7 @@ writer)
   [ -n "$obj" ] || { echo "no object in gs://$DAILY/$OBJ_PREFIX/: run 'probe host' first" >&2; exit 2; }
   echo "probe" >"$SCRATCH/probe.txt"
   until="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)"
-  # shellcheck disable=SC2317  # called through run_check
+  # shellcheck disable=SC2317,SC2329  # called indirectly, as run_check's command
   W() { as_writer "$VAL_WRITER" "$@"; }
 
   run_check ok "writer can read its own object back" W storage objects describe "$obj"
@@ -278,7 +278,7 @@ emergency)
   junk="gs://$DAILY/junk/$(date -u +%Y%m%dT%H%M%S).txt"
   run_check ok "writer uploads an object to the unlocked tier" as_writer "$VAL_WRITER" storage cp "$SCRATCH/junk.txt" "$junk"
   locked_obj="$(newest_object "$LOCKED")"
-  # shellcheck disable=SC2317  # called through run_check
+  # shellcheck disable=SC2317,SC2329  # called indirectly, as run_check's command
   E() { as_writer "$EMERGENCY" "$@"; }
 
   run_check ok "emergency can list the unlocked tier" E storage ls "gs://$DAILY/"
