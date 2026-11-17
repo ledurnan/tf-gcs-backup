@@ -113,13 +113,14 @@ Needs no key and changes nothing.
 ```bash
 systemctl list-timers offsite-backup.timer        # active, next run scheduled
 systemctl status offsite-backup.service --no-pager # last run succeeded, within a day
-journalctl -u offsite-backup.service --since -2d --no-pager | tail -20
-grep -c '^age1' /etc/offsite-backup/recipients    # the number of keys you expect
+sudo journalctl -u offsite-backup.service --since -2d --no-pager | tail -20
+sudo grep -c '^age1' /etc/offsite-backup/recipients   # the number of keys you expect
 sudo grep -rl 'AGE-SECRET-KEY-' /etc /root /home 2>/dev/null   # must print nothing
 ```
 
-Compare the recipients in `/etc/offsite-backup/recipients` with the
-host's `offsite_backup_age_recipients` in your inventory: the same keys,
+The configuration directory is the role's `offsite_backup_conf_dir`
+(`/etc/offsite-backup` by default) and only root can read it. Compare the
+recipients in its `recipients` file with the host's `offsite_backup_age_recipients` in your inventory: the same keys,
 no more. Look for leftovers of an earlier restore on the host (an
 unpacked `offsite-backup-dump/`, a stray `.tar.age`).
 
@@ -137,11 +138,12 @@ whether to go on.
 As your own Google account, from the operator's machine. Go by the
 creation time in the second column, not by the name: the host chooses
 the names, and a compromised host could leave one that sorts last.
+`awk 'NF == 3'` drops the `TOTAL:` line gcloud adds at the end.
 
 ```bash
 export CLOUDSDK_CORE_ACCOUNT=you@example.com CLOUDSDK_CORE_PROJECT=your-project-id
 for tier in daily weekly monthly; do
-  gcloud storage ls -l "gs://yourorg-backup-host-a-${tier}/host-a/" | sort -k2 | tail -3
+  gcloud storage ls -l "gs://yourorg-backup-host-a-${tier}/host-a/" | awk 'NF == 3' | sort -k2 | tail -3
 done
 ```
 
@@ -183,9 +185,16 @@ umask 077
 W="$(mktemp -d -p /dev/shm dr-XXXXXX)"  # RAM only
 mkdir "$W/tmp" "$W/x"
 export TMPDIR="$W/tmp"                  # restore-test's scratch copy goes here, in RAM
+df -h /dev/shm                          # room for about 3 times the largest object
 TG=<path to a checkout of tf-gcs-backup at the release the hosts run>
 export CLOUDSDK_CORE_ACCOUNT=you@example.com CLOUDSDK_CORE_PROJECT=your-project-id
 ```
+
+Everything decrypted goes to `/dev/shm`, which is usually half the RAM.
+The fetched object, its decrypted copy and the unpacked archive need
+about three times the size of the largest object from step 1. If
+`/dev/shm` hasn't that room, stop here, before a key is loaded, rather
+than run out part way through.
 
 ## 3. Decrypt proof: every tier, every key [operator]
 
@@ -360,7 +369,7 @@ Then, in the same terminal:
 ```bash
 unset AGE_ID
 rm -rf "$W"
-docker ps -a --filter name=dr- -q | xargs -r docker rm -f
+docker rm -f dr-db 2>/dev/null || true   # and any other container you started
 exit                    # leaves the guarded shell, after $W is gone
 ```
 
