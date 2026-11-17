@@ -79,3 +79,7 @@ environment instead.
 
 Schedule it where an operator key is available (never on the backed-up
 host), and run it after any change to paths, the dump or the keys.
+
+To test recovery as a whole, with every key, a restore into a throwaway
+target and a record of each test, copy the runbook template in
+[dr-testing.md](dr-testing.md).

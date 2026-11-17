@@ -100,6 +100,10 @@ What it can't guarantee:
 [`docs/restore.md`](docs/restore.md). Prove it works on a schedule with
 [`scripts/restore-test`](scripts/restore-test): a backup nobody has
 restored is a rumour.
+[`docs/dr-testing.md`](docs/dr-testing.md) is a disaster-recovery testing
+runbook to copy into your own repository: decrypt proof with every key,
+integrity checks, a restore into a throwaway target, a rebuild check, and
+a dated results log.
 
 ## Scope
 
