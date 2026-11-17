@@ -119,9 +119,10 @@ sudo grep -rl 'AGE-SECRET-KEY-' /etc /root /home 2>/dev/null   # must print noth
 ```
 
 The configuration directory is the role's `offsite_backup_conf_dir`
-(`/etc/offsite-backup` by default) and only root can read it. Compare the
-recipients in its `recipients` file with the host's `offsite_backup_age_recipients` in your inventory: the same keys,
-no more. Look for leftovers of an earlier restore on the host (an
+(`/etc/offsite-backup` by default) and only root can read it. Compare
+the keys in its `recipients` file with the host's
+`offsite_backup_age_recipients` in your inventory: the same keys, no
+more. Look for leftovers of an earlier restore on the host (an
 unpacked `offsite-backup-dump/`, a stray `.tar.age`).
 
 **On the operator's machine:** nothing left from an earlier test (step 7's
@@ -185,16 +186,18 @@ umask 077
 W="$(mktemp -d -p /dev/shm dr-XXXXXX)"  # RAM only
 mkdir "$W/tmp" "$W/x"
 export TMPDIR="$W/tmp"                  # restore-test's scratch copy goes here, in RAM
-df -h /dev/shm                          # room for about 3 times the largest object
+df -h /dev/shm                          # room for the object plus its unpacked size
 TG=<path to a checkout of tf-gcs-backup at the release the hosts run>
 export CLOUDSDK_CORE_ACCOUNT=you@example.com CLOUDSDK_CORE_PROJECT=your-project-id
 ```
 
 Everything decrypted goes to `/dev/shm`, which is usually half the RAM.
-The fetched object, its decrypted copy and the unpacked archive need
-about three times the size of the largest object from step 1. If
-`/dev/shm` hasn't that room, stop here, before a key is loaded, rather
-than run out part way through.
+It needs room for the largest object from step 1 plus its unpacked size,
+which for text and plain SQL dumps can be many times the compressed
+object: take it from step 4's `du -sh` in the last test, noted in its
+log row, or the first time allow ten times the object. If `/dev/shm` hasn't that room,
+stop here, before a key is loaded, rather than run out part way through.
+Step 5's container tmpfs takes RAM too, outside `/dev/shm`.
 
 ## 3. Decrypt proof: every tier, every key [operator]
 
@@ -257,13 +260,16 @@ Steps 4 and 5 need only one key: load the operator key again.
 ## 4. Unpack and check integrity [operator]
 
 Fetch the object `restore-test` named, decrypt it into RAM and unpack it
-there. Repeat for each object you restore in step 5.
+there. Repeat for each object you restore in step 5, emptying `$W/x`
+first so one object's files can't stand in for another's.
 
 ```bash
+rm -rf "$W/x" "$W/obj.tar.age" && mkdir "$W/x"
 obj=gs://yourorg-backup-host-a-daily/host-a/<object>.tar.age   # from step 1 or 3
 gcloud storage cp "$obj" "$W/obj.tar.age"
 age -d -i <(printf '%s\n' "$AGE_ID") "$W/obj.tar.age" | tar -xz -C "$W/x"
 ls "$W/x" "$W/x/offsite-backup-dump"
+du -sh "$W/x"                                                  # unpacked size: note it in the log row
 ```
 
 **The dump's own checks.** The module archives whatever your pre-backup
