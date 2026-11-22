@@ -21,14 +21,14 @@ provider "google" {
 }
 
 module "writer_role" {
-  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.1.0"
+  source  = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/project-role?ref=v0.4.0"
   project = var.project
   role_id = var.role_id
   title   = "tf-gcs-backup validation writer (disposable)"
 }
 
 module "upgraded" {
-  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.1.0"
+  source             = "git::https://github.com/ledurnan/tf-gcs-backup.git//modules/backup-target?ref=v0.4.0"
   project            = var.project
   location           = var.location
   bucket_name        = "${var.name_prefix}-upg"
