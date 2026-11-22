@@ -1,3 +1,4 @@
+# repo-standards: custom - no directory is exempt: docs and examples are scanned
 # Gitleaks Configuration for Development Repository
 # Extends default gitleaks rules with custom patterns for LLM APIs, IaC, and more
 

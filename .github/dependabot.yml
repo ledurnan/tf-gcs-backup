@@ -1,0 +1,25 @@
+# Managed by repo-standards (myrunner/dev). Regenerate: repo-standards sync --only dependabot .
+version: 2
+updates:
+  - package-ecosystem: "terraform"
+    directories:
+      - "/examples/terraform"
+      - "/modules/backup-target"
+      - "/modules/project-role"
+      - "/tests/gcs-validation/v01"
+      - "/tests/gcs-validation/v02"
+    schedule:
+      interval: "weekly"
+    groups:
+      terraform:
+        patterns:
+          - "*"
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
